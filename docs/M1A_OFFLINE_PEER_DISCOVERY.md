@@ -36,10 +36,13 @@ Stable identity is revealed only after the future trust/session layer authorizes
 ## Android baseline
 
 - minSdk 26
+- compileSdk 37
 - targetSdk 36
 - AGP 9.4.0
 - Gradle 9.6.0 in CI
 - Compose BOM 2026.09.00
+
+`compileSdk` is intentionally newer than `targetSdk`: the current Compose artifacts require API 37 at compile time, while Telemetry keeps target API 36 for the current runtime compatibility baseline.
 
 ## M1A acceptance test
 
