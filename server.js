@@ -19,9 +19,49 @@ const app = express();
 const port = Number(process.env.PORT || 3000);
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+const ANDROID_REPO = '9dbit/Telemetry';
+const ANDROID_ASSET = 'Telemetry-Android-Preview.apk';
 
 app.disable('x-powered-by');
 app.use(express.json({ limit: '256kb' }));
+
+function parseReleaseField(body, name) {
+  const match = String(body || '').match(new RegExp(`^${name}:\\s*(.+)$`, 'mi'));
+  return match?.[1]?.trim() || '';
+}
+
+async function latestAndroidPreviewRelease() {
+  const response = await fetch(`https://api.github.com/repos/${ANDROID_REPO}/releases?per_page=20`, {
+    headers: {
+      Accept: 'application/vnd.github+json',
+      'User-Agent': 'Telemetry-Control-Plane'
+    }
+  });
+  if (!response.ok) throw new Error(`GitHub release lookup failed (${response.status})`);
+  const releases = await response.json();
+  const release = releases.find((item) => /^android-preview-\d+$/.test(item.tag_name));
+  if (!release) throw new Error('No Telemetry Android preview release is published yet');
+
+  const versionCode = Number(parseReleaseField(release.body, 'Version-Code') || release.tag_name.split('-').at(-1));
+  const versionName = parseReleaseField(release.body, 'Version-Name') || `preview-${versionCode}`;
+  const sha256 = parseReleaseField(release.body, 'SHA-256').toLowerCase();
+  const asset = release.assets?.find((item) => item.name === ANDROID_ASSET);
+
+  if (!Number.isInteger(versionCode) || versionCode <= 0) throw new Error('Preview release version code is invalid');
+  if (!asset?.browser_download_url) throw new Error('Preview release APK is missing');
+  if (!/^[a-f0-9]{64}$/.test(sha256)) throw new Error('Preview release checksum is missing');
+
+  return {
+    channel: 'preview',
+    versionCode,
+    versionName,
+    apkUrl: asset.browser_download_url,
+    sha256,
+    notes: release.name || `Telemetry Android Preview ${versionName}`,
+    publishedAt: release.published_at,
+    releaseUrl: release.html_url
+  };
+}
 
 app.get('/health', (_req, res) => {
   res.status(200).json({
@@ -83,6 +123,26 @@ app.get('/api/v1/protocol', (_req, res) => {
     },
     deliveryModel: 'store-and-forward'
   });
+});
+
+app.get('/api/v1/android/update', async (req, res) => {
+  try {
+    const channel = typeof req.query.channel === 'string' ? req.query.channel : 'preview';
+    if (channel !== 'preview') {
+      return res.status(400).json({ ok: false, error: 'Only the preview channel is available during development' });
+    }
+    const currentVersionCode = Math.max(0, Number(req.query.versionCode || 0));
+    const latest = await latestAndroidPreviewRelease();
+    res.set('Cache-Control', 'no-store');
+    return res.json({
+      ok: true,
+      ...latest,
+      currentVersionCode,
+      updateAvailable: latest.versionCode > currentVersionCode
+    });
+  } catch (error) {
+    return res.status(503).json({ ok: false, error: error.message });
+  }
 });
 
 app.post('/api/v1/route', (req, res) => {
