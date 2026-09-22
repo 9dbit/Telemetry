@@ -10,6 +10,8 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -45,6 +47,7 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
@@ -69,7 +72,8 @@ private val TelemetryCyan = Color(0xFF38E2C2)
 private val TextPrimary = Color(0xFFF4F8FF)
 private val TextSecondary = Color(0xFF9DAFC7)
 private val Divider = Color(0xFF20344D)
-private val DangerSoft = Color(0xFF3A2230)
+private val SosRed = Color(0xFFE43D4F)
+private val SosRedDark = Color(0xFF35171F)
 
 private val TelemetryScheme = darkColorScheme(
     primary = TelemetryBlue,
@@ -81,13 +85,14 @@ private val TelemetryScheme = darkColorScheme(
     onSurface = TextPrimary
 )
 
-private enum class AppScreen { HOME, DISCOVER, VERIFY, CHAT }
+private enum class AppScreen { MESSAGES, NEARBY, VERIFY, CHAT, NETWORK, SETTINGS, SOS }
 
 data class ChatMessage(
     val text: String,
     val outgoing: Boolean,
     val time: String,
-    val delivered: Boolean = false
+    val delivered: Boolean = false,
+    val emergency: Boolean = false
 )
 
 class MainActivity : ComponentActivity() {
@@ -96,13 +101,17 @@ class MainActivity : ComponentActivity() {
     private var discovery: TelemetryBleDiscovery? = null
     private var transport: TelemetryGattTransport? = null
     private var uiState by mutableStateOf(M1BUiState())
-    private var screen by mutableStateOf(AppScreen.HOME)
+    private var screen by mutableStateOf(AppScreen.MESSAGES)
 
     private val permissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
     ) { result ->
         if (result.values.all { it }) startDiscovery()
-        else uiState = uiState.copy(status = "Nearby devices permission denied")
+        else uiState = uiState.copy(
+            status = "Nearby devices permission denied",
+            discoveryActive = false,
+            advertising = false
+        )
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -116,18 +125,27 @@ class MainActivity : ComponentActivity() {
 
         setContent {
             MaterialTheme(colorScheme = TelemetryScheme) {
-                TelemetryApp(
+                TelemetryAppV2(
                     screen = screen,
                     state = uiState,
-                    onStart = ::openDiscovery,
-                    onStop = ::stopDiscovery,
+                    onMessages = { screen = AppScreen.MESSAGES },
+                    onNearby = ::openNearby,
+                    onNetwork = { screen = AppScreen.NETWORK },
+                    onSettings = { screen = AppScreen.SETTINGS },
+                    onSos = { screen = AppScreen.SOS },
+                    onStopDiscovery = ::stopDiscovery,
+                    onScanAgain = ::ensurePermissionsAndStart,
                     onConnect = { transport?.connect(it.radioAddress) },
                     onTrust = ::trustPending,
+                    onOpenChat = { if (uiState.connectedAddress != null) screen = AppScreen.CHAT },
                     onDraft = { uiState = uiState.copy(draft = it) },
                     onSend = ::sendDraft,
-                    onDiscover = { screen = AppScreen.DISCOVER },
-                    onChat = { if (uiState.connectedAddress != null) screen = AppScreen.CHAT },
-                    onHome = { screen = AppScreen.HOME }
+                    onNearbyQuery = { uiState = uiState.copy(nearbyQuery = it) },
+                    onStrongOnly = { uiState = uiState.copy(strongOnly = it) },
+                    onToggleDiagnostics = {
+                        uiState = uiState.copy(showDiagnostics = !uiState.showDiagnostics)
+                    },
+                    onTriggerSos = ::sendEmergency
                 )
             }
         }
@@ -139,15 +157,18 @@ class MainActivity : ComponentActivity() {
         super.onDestroy()
     }
 
-    private fun openDiscovery() {
-        screen = AppScreen.DISCOVER
+    private fun openNearby() {
+        screen = AppScreen.NEARBY
         ensurePermissionsAndStart()
     }
 
     private fun ensurePermissionsAndStart() {
         val required = requiredPermissions()
-        if (required.all { checkSelfPermission(it) == PackageManager.PERMISSION_GRANTED }) startDiscovery()
-        else permissionLauncher.launch(required)
+        if (required.all { checkSelfPermission(it) == PackageManager.PERMISSION_GRANTED }) {
+            startDiscovery()
+        } else {
+            permissionLauncher.launch(required)
+        }
     }
 
     private fun requiredPermissions(): Array<String> = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
@@ -163,15 +184,23 @@ class MainActivity : ComponentActivity() {
     private fun startDiscovery() {
         discovery?.stop()
         transport?.start()
-        uiState = uiState.copy(status = "Scanning nearby Telemetry devices…")
-        discovery = TelemetryBleDiscovery(this) { event -> runOnUiThread { reduceDiscovery(event) } }
-            .also { it.start() }
+        uiState = uiState.copy(
+            status = "Scanning nearby Telemetry devices…",
+            discoveryActive = true
+        )
+        discovery = TelemetryBleDiscovery(this) { event ->
+            runOnUiThread { reduceDiscovery(event) }
+        }.also { it.start() }
     }
 
     private fun stopDiscovery() {
         discovery?.stop()
         discovery = null
-        uiState = uiState.copy(status = "Discovery paused · secure sessions stay active")
+        uiState = uiState.copy(
+            status = "Discovery paused · secure sessions stay active",
+            discoveryActive = false,
+            advertising = false
+        )
     }
 
     private fun trustPending() {
@@ -198,9 +227,40 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    private fun sendEmergency() {
+        val address = uiState.connectedAddress
+        if (address == null) {
+            uiState = uiState.copy(
+                sosStatus = "No trusted peer connected. Open Nearby and connect before sending SOS."
+            )
+            return
+        }
+
+        val text = "SOS · Emergency assistance requested"
+        if (transport?.sendMessage(address, text) == true) {
+            uiState = uiState.copy(
+                messages = uiState.messages + ChatMessage(
+                    text = text,
+                    outgoing = true,
+                    time = nowLabel(),
+                    emergency = true
+                ),
+                status = "SOS encrypted alert sent · waiting for signed receipt",
+                sosStatus = "Encrypted SOS sent to the active trusted peer.",
+                sosSentAt = nowLabel()
+            )
+        } else {
+            uiState = uiState.copy(
+                sosStatus = "Unable to send SOS on the current direct route."
+            )
+        }
+    }
+
     private fun reduceDiscovery(event: DiscoveryEvent) {
         uiState = when (event) {
             is DiscoveryEvent.Started -> uiState.copy(
+                discoveryActive = true,
+                advertising = event.advertising,
                 status = if (event.advertising) {
                     "Offline discovery active · scanning + advertising"
                 } else {
@@ -212,16 +272,28 @@ class MainActivity : ComponentActivity() {
                     .associateBy { it.radioAddress }
                     .values
                     .sortedByDescending { it.rssi }
-                uiState.copy(peers = merged, status = "${merged.size} Telemetry peer(s) nearby")
+                uiState.copy(
+                    peers = merged,
+                    status = "${merged.size} Telemetry peer(s) nearby"
+                )
             }
-            is DiscoveryEvent.Error -> uiState.copy(status = event.message)
-            DiscoveryEvent.Stopped -> uiState.copy(status = "Discovery stopped")
+            is DiscoveryEvent.Error -> uiState.copy(
+                status = event.message,
+                discoveryActive = false
+            )
+            DiscoveryEvent.Stopped -> uiState.copy(
+                status = "Discovery stopped",
+                discoveryActive = false,
+                advertising = false
+            )
         }
     }
 
     private fun reduceSecure(event: SecureTransportEvent) {
         uiState = when (event) {
-            is SecureTransportEvent.Connecting -> uiState.copy(status = "Connecting securely to nearby peer…")
+            is SecureTransportEvent.Connecting -> uiState.copy(
+                status = "Connecting securely to nearby peer…"
+            )
             is SecureTransportEvent.PendingVerification -> {
                 screen = AppScreen.VERIFY
                 uiState.copy(
@@ -250,7 +322,8 @@ class MainActivity : ComponentActivity() {
                     text = event.text,
                     outgoing = false,
                     time = nowLabel(),
-                    delivered = true
+                    delivered = true,
+                    emergency = event.text.startsWith("SOS")
                 )
             )
             is SecureTransportEvent.DeliveryConfirmed -> uiState.copy(
@@ -273,12 +346,13 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun nowLabel(): String = SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date())
+    private fun nowLabel(): String =
+        SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date())
 }
 
 data class M1BUiState(
     val localDeviceId: String = "",
-    val status: String = "Ready for secure offline communication",
+    val status: String = "Offline ready · no internet required",
     val peers: List<PeerCandidate> = emptyList(),
     val pendingDeviceId: String? = null,
     val pendingAddress: String? = null,
@@ -286,207 +360,403 @@ data class M1BUiState(
     val connectedAddress: String? = null,
     val trustedDeviceId: String? = null,
     val draft: String = "",
-    val messages: List<ChatMessage> = emptyList()
+    val messages: List<ChatMessage> = emptyList(),
+    val discoveryActive: Boolean = false,
+    val advertising: Boolean = false,
+    val nearbyQuery: String = "",
+    val strongOnly: Boolean = false,
+    val showDiagnostics: Boolean = false,
+    val sosStatus: String? = null,
+    val sosSentAt: String? = null
 )
 
 @Composable
-private fun TelemetryApp(
+private fun TelemetryAppV2(
     screen: AppScreen,
     state: M1BUiState,
-    onStart: () -> Unit,
-    onStop: () -> Unit,
+    onMessages: () -> Unit,
+    onNearby: () -> Unit,
+    onNetwork: () -> Unit,
+    onSettings: () -> Unit,
+    onSos: () -> Unit,
+    onStopDiscovery: () -> Unit,
+    onScanAgain: () -> Unit,
     onConnect: (PeerCandidate) -> Unit,
     onTrust: () -> Unit,
+    onOpenChat: () -> Unit,
     onDraft: (String) -> Unit,
     onSend: () -> Unit,
-    onDiscover: () -> Unit,
-    onChat: () -> Unit,
-    onHome: () -> Unit
+    onNearbyQuery: (String) -> Unit,
+    onStrongOnly: (Boolean) -> Unit,
+    onToggleDiagnostics: () -> Unit,
+    onTriggerSos: () -> Unit
 ) {
     Box(
         modifier = Modifier
             .fillMaxSize()
             .background(
                 Brush.verticalGradient(
-                    colors = listOf(Color(0xFF09182A), Ink, Color(0xFF050B13))
+                    colors = listOf(Color(0xFF0A1A2D), Ink, Color(0xFF050B13))
                 )
             )
     ) {
         when (screen) {
-            AppScreen.HOME -> HomeScreen(state, onStart)
-            AppScreen.DISCOVER -> DiscoverScreen(state, onStop, onConnect, onDiscover, onChat, onHome)
-            AppScreen.VERIFY -> VerifyScreen(state, onTrust) { onDiscover() }
-            AppScreen.CHAT -> ChatScreen(state, onDraft, onSend, onDiscover, onChat, onHome)
+            AppScreen.MESSAGES -> MessagesScreen(
+                state = state,
+                onNearby = onNearby,
+                onOpenChat = onOpenChat,
+                onSos = onSos,
+                onMessages = onMessages,
+                onNetwork = onNetwork,
+                onSettings = onSettings
+            )
+            AppScreen.NEARBY -> NearbyScreen(
+                state = state,
+                onStop = onStopDiscovery,
+                onScanAgain = onScanAgain,
+                onConnect = onConnect,
+                onQuery = onNearbyQuery,
+                onStrongOnly = onStrongOnly,
+                onToggleDiagnostics = onToggleDiagnostics,
+                onMessages = onMessages,
+                onNearby = onNearby,
+                onNetwork = onNetwork,
+                onSettings = onSettings
+            )
+            AppScreen.VERIFY -> VerifyScreen(
+                state = state,
+                onTrust = onTrust,
+                onCancel = onNearby
+            )
+            AppScreen.CHAT -> ChatScreen(
+                state = state,
+                onDraft = onDraft,
+                onSend = onSend,
+                onMessages = onMessages,
+                onNearby = onNearby,
+                onNetwork = onNetwork,
+                onSettings = onSettings
+            )
+            AppScreen.NETWORK -> NetworkScreen(
+                state = state,
+                onNearby = onNearby,
+                onMessages = onMessages,
+                onNetwork = onNetwork,
+                onSettings = onSettings
+            )
+            AppScreen.SETTINGS -> SettingsScreen(
+                state = state,
+                onMessages = onMessages,
+                onNearby = onNearby,
+                onNetwork = onNetwork,
+                onSettings = onSettings
+            )
+            AppScreen.SOS -> SosScreen(
+                state = state,
+                onBack = onMessages,
+                onNearby = onNearby,
+                onTrigger = onTriggerSos
+            )
         }
     }
 }
 
 @Composable
-private fun HomeScreen(state: M1BUiState, onStart: () -> Unit) {
-    Column(
-        modifier = Modifier.fillMaxSize().padding(horizontal = 24.dp, vertical = 20.dp),
-        horizontalAlignment = Alignment.CenterHorizontally
-    ) {
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.Center
-        ) {
-            StatusChip("● Offline", TelemetryCyan)
-            Spacer(Modifier.width(8.dp))
-            StatusChip("▣ Encrypted", TelemetryBlue)
-            Spacer(Modifier.width(8.dp))
-            StatusChip("⌁ No Internet", TextSecondary)
-        }
-
-        Spacer(Modifier.height(76.dp))
-        TelemetryMark(92)
-        Spacer(Modifier.height(20.dp))
-        Text(
-            "Telemetry",
-            color = TextPrimary,
-            fontSize = 42.sp,
-            fontWeight = FontWeight.SemiBold
-        )
-        Spacer(Modifier.height(8.dp))
-        Text(
-            "Secure offline communication\nfor a more connected world.",
-            color = TextSecondary,
-            fontSize = 17.sp,
-            lineHeight = 24.sp,
-            textAlign = TextAlign.Center
-        )
-
-        Spacer(Modifier.height(42.dp))
-        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
-            FeatureMini("◎", "Find", "nearby people")
-            FeatureMini("▣", "End-to-end", "encrypted")
-            FeatureMini("⌁", "Works", "without internet")
-        }
-
-        Spacer(Modifier.weight(1f))
-        PrimaryButton("Start Offline  →", onStart, Modifier.fillMaxWidth())
-        Spacer(Modifier.height(14.dp))
-        Text(
-            "REAL CONNECTIONS STILL MATTER",
-            color = Color(0xFF6F839D),
-            fontSize = 10.sp,
-            letterSpacing = 2.4.sp
-        )
-        Spacer(Modifier.height(8.dp))
-        Text(
-            "Device ${state.localDeviceId.takeLast(8)}",
-            color = Color(0xFF50657F),
-            fontSize = 10.sp
-        )
-    }
-}
-
-@Composable
-private fun DiscoverScreen(
+private fun MessagesScreen(
     state: M1BUiState,
-    onStop: () -> Unit,
-    onConnect: (PeerCandidate) -> Unit,
-    onDiscover: () -> Unit,
-    onChat: () -> Unit,
-    onHome: () -> Unit
+    onNearby: () -> Unit,
+    onOpenChat: () -> Unit,
+    onSos: () -> Unit,
+    onMessages: () -> Unit,
+    onNetwork: () -> Unit,
+    onSettings: () -> Unit
 ) {
     Scaffold(
         containerColor = Color.Transparent,
         bottomBar = {
             TelemetryBottomBar(
-                active = "Discover",
-                chatEnabled = state.connectedAddress != null,
-                onDiscover = onDiscover,
-                onChat = onChat,
-                onHome = onHome
+                active = "Messages",
+                onMessages = onMessages,
+                onNearby = onNearby,
+                onNetwork = onNetwork,
+                onSettings = onSettings
             )
         }
     ) { padding ->
         Column(
-            modifier = Modifier.fillMaxSize().padding(padding).padding(horizontal = 20.dp, vertical = 12.dp)
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(padding)
+                .padding(horizontal = 20.dp, vertical = 14.dp)
         ) {
-            Text("Discover Peers", color = TextPrimary, fontSize = 28.sp, fontWeight = FontWeight.SemiBold)
-            Spacer(Modifier.height(4.dp))
-            Text("Find nearby devices using Bluetooth.\nNo internet required.", color = TextSecondary, fontSize = 14.sp)
-
-            Spacer(Modifier.height(18.dp))
-            Card(
+            Row(
                 modifier = Modifier.fillMaxWidth(),
-                colors = CardDefaults.cardColors(containerColor = InkSoft),
-                shape = RoundedCornerShape(18.dp)
+                verticalAlignment = Alignment.CenterVertically
             ) {
-                Row(
-                    modifier = Modifier.fillMaxWidth().padding(16.dp),
-                    verticalAlignment = Alignment.CenterVertically
+                Box(
+                    modifier = Modifier
+                        .size(42.dp)
+                        .background(Color(0xFF16304D), CircleShape),
+                    contentAlignment = Alignment.Center
                 ) {
-                    Box(
-                        modifier = Modifier.size(42.dp).background(Color(0xFF12345C), CircleShape),
-                        contentAlignment = Alignment.Center
-                    ) { Text("ᛒ", color = TelemetryBlue, fontSize = 21.sp) }
-                    Spacer(Modifier.width(12.dp))
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text("Scanning for nearby devices…", color = TextPrimary, fontWeight = FontWeight.Medium)
-                        Text(state.status, color = TextSecondary, fontSize = 12.sp)
-                    }
-                    Box(
-                        modifier = Modifier.size(12.dp).background(TelemetryCyan, CircleShape)
+                    TelemetryMark(24)
+                }
+                Spacer(Modifier.width(10.dp))
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        "Telemetry",
+                        color = TextPrimary,
+                        fontWeight = FontWeight.SemiBold,
+                        fontSize = 16.sp
+                    )
+                    Text(
+                        "Offline ready",
+                        color = TelemetryCyan,
+                        fontSize = 11.sp
                     )
                 }
+                StatusChip("No Internet", TextSecondary)
             }
+
+            Spacer(Modifier.height(26.dp))
+            Text(
+                "Messages",
+                color = TextPrimary,
+                fontSize = 34.sp,
+                fontWeight = FontWeight.Bold
+            )
+            Spacer(Modifier.height(4.dp))
+            Text(
+                "Trusted conversations and emergency chats, all in one place.",
+                color = TextSecondary,
+                fontSize = 14.sp
+            )
 
             Spacer(Modifier.height(18.dp))
-            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                Text("Nearby peers", color = TextPrimary, fontSize = 17.sp, fontWeight = FontWeight.SemiBold)
-                Text("Pause", color = TelemetryBlue, fontSize = 13.sp, modifier = Modifier.padding(4.dp))
-            }
-            Spacer(Modifier.height(8.dp))
+            StaticSearchField("Search chats")
 
-            if (state.peers.isEmpty()) {
-                EmptyDiscoveryCard()
+            Spacer(Modifier.height(14.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                FilterChip("All", true) {}
+                FilterChip("Nearby ${if (state.connectedAddress != null) "1" else "0"}", false, onNearby)
+            }
+
+            Spacer(Modifier.height(22.dp))
+            Text(
+                "Inbox",
+                color = TextPrimary,
+                fontSize = 18.sp,
+                fontWeight = FontWeight.SemiBold
+            )
+            Spacer(Modifier.height(10.dp))
+
+            if (state.connectedAddress != null) {
+                ConversationCard(state, onOpenChat)
             } else {
-                LazyColumn(
-                    modifier = Modifier.weight(1f),
-                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                EmptyInboxCard(onNearby)
+            }
+
+            Spacer(Modifier.weight(1f))
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.End
+            ) {
+                Button(
+                    onClick = onSos,
+                    shape = RoundedCornerShape(28.dp),
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = SosRed,
+                        contentColor = Color.White
+                    ),
+                    modifier = Modifier.height(58.dp)
                 ) {
-                    items(state.peers, key = { it.radioAddress }) { peer ->
-                        PeerCard(peer, onConnect)
-                    }
+                    Text("⚠  SOS", fontWeight = FontWeight.Bold, fontSize = 16.sp)
                 }
             }
-
-            Button(
-                onClick = onStop,
-                colors = ButtonDefaults.buttonColors(containerColor = Color.Transparent, contentColor = TextSecondary),
-                modifier = Modifier.align(Alignment.CenterHorizontally)
-            ) { Text("Stop discovery") }
+            Spacer(Modifier.height(10.dp))
         }
     }
 }
 
 @Composable
-private fun VerifyScreen(state: M1BUiState, onTrust: () -> Unit, onCancel: () -> Unit) {
+private fun NearbyScreen(
+    state: M1BUiState,
+    onStop: () -> Unit,
+    onScanAgain: () -> Unit,
+    onConnect: (PeerCandidate) -> Unit,
+    onQuery: (String) -> Unit,
+    onStrongOnly: (Boolean) -> Unit,
+    onToggleDiagnostics: () -> Unit,
+    onMessages: () -> Unit,
+    onNearby: () -> Unit,
+    onNetwork: () -> Unit,
+    onSettings: () -> Unit
+) {
+    val visiblePeers = state.peers.filter { peer ->
+        val queryMatch = state.nearbyQuery.isBlank() ||
+            peer.ephemeralId.contains(state.nearbyQuery, ignoreCase = true)
+        val strengthMatch = !state.strongOnly || peer.rssi >= -67
+        queryMatch && strengthMatch
+    }
+
+    Scaffold(
+        containerColor = Color.Transparent,
+        bottomBar = {
+            TelemetryBottomBar(
+                active = "Nearby",
+                onMessages = onMessages,
+                onNearby = onNearby,
+                onNetwork = onNetwork,
+                onSettings = onSettings
+            )
+        }
+    ) { padding ->
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(padding)
+                .padding(horizontal = 20.dp, vertical = 12.dp)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        "Nearby Devices",
+                        color = TextPrimary,
+                        fontSize = 28.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Text(
+                        "Find Telemetry peers without internet.",
+                        color = TextSecondary,
+                        fontSize = 13.sp
+                    )
+                }
+                Button(
+                    onClick = if (state.discoveryActive) onStop else onScanAgain,
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = Color.Transparent,
+                        contentColor = TelemetryBlue
+                    )
+                ) {
+                    Text(if (state.discoveryActive) "Stop" else "Scan")
+                }
+            }
+
+            Spacer(Modifier.height(14.dp))
+            OutlinedTextField(
+                value = state.nearbyQuery,
+                onValueChange = onQuery,
+                placeholder = { Text("Search by device ID…", color = TextSecondary) },
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(18.dp),
+                colors = OutlinedTextFieldDefaults.colors(
+                    focusedContainerColor = InkRaised,
+                    unfocusedContainerColor = InkRaised,
+                    focusedBorderColor = Divider,
+                    unfocusedBorderColor = Divider,
+                    focusedTextColor = TextPrimary,
+                    unfocusedTextColor = TextPrimary
+                ),
+                singleLine = true
+            )
+
+            Spacer(Modifier.height(10.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                FilterChip("All ${state.peers.size}", !state.strongOnly) {
+                    onStrongOnly(false)
+                }
+                FilterChip(
+                    "Strong ${state.peers.count { it.rssi >= -67 }}",
+                    state.strongOnly
+                ) {
+                    onStrongOnly(true)
+                }
+            }
+
+            Spacer(Modifier.height(14.dp))
+            ScannerStatusCard(state)
+
+            Spacer(Modifier.height(14.dp))
+            if (visiblePeers.isEmpty()) {
+                EmptyDiscoveryCard(
+                    state = state,
+                    onScanAgain = onScanAgain,
+                    onDiagnostics = onToggleDiagnostics
+                )
+            } else {
+                Text(
+                    "Potential Telemetry Devices",
+                    color = TextPrimary,
+                    fontSize = 17.sp,
+                    fontWeight = FontWeight.SemiBold
+                )
+                Spacer(Modifier.height(8.dp))
+                LazyColumn(
+                    modifier = Modifier.weight(1f),
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    items(visiblePeers, key = { it.radioAddress }) { peer ->
+                        PeerCardV2(peer, onConnect)
+                    }
+                }
+            }
+
+            if (state.showDiagnostics) {
+                Spacer(Modifier.height(10.dp))
+                DiagnosticsCard(state)
+            }
+        }
+    }
+}
+
+@Composable
+private fun VerifyScreen(
+    state: M1BUiState,
+    onTrust: () -> Unit,
+    onCancel: () -> Unit
+) {
     Column(
         modifier = Modifier.fillMaxSize().padding(24.dp),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
         Row(modifier = Modifier.fillMaxWidth()) {
-            Text("‹", color = TextPrimary, fontSize = 34.sp)
+            Text(
+                "‹",
+                color = TextPrimary,
+                fontSize = 34.sp,
+                modifier = Modifier.clickable(onClick = onCancel)
+            )
         }
         Spacer(Modifier.height(22.dp))
-        Text("Verify Identity", color = TextPrimary, fontSize = 28.sp, fontWeight = FontWeight.SemiBold)
+        Text(
+            "Verify Identity",
+            color = TextPrimary,
+            fontSize = 28.sp,
+            fontWeight = FontWeight.SemiBold
+        )
         Spacer(Modifier.height(8.dp))
         Text(
-            "Compare this code with your peer\nto ensure a secure connection.",
+            "Compare this safety code on both phones.",
             color = TextSecondary,
             fontSize = 14.sp,
             textAlign = TextAlign.Center
         )
 
         Spacer(Modifier.height(36.dp))
-        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(22.dp)) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(22.dp)
+        ) {
             DeviceCircle("▯", "This device", state.localDeviceId.takeLast(6))
             Text("⇄", color = TelemetryCyan, fontSize = 32.sp)
-            DeviceCircle("▯", "Peer device", state.pendingDeviceId?.takeLast(6) ?: "peer")
+            DeviceCircle(
+                "▯",
+                "Peer device",
+                state.pendingDeviceId?.takeLast(6) ?: "peer"
+            )
         }
 
         Spacer(Modifier.height(34.dp))
@@ -499,7 +769,12 @@ private fun VerifyScreen(state: M1BUiState, onTrust: () -> Unit, onCancel: () ->
                 modifier = Modifier.fillMaxWidth().padding(vertical = 28.dp),
                 horizontalAlignment = Alignment.CenterHorizontally
             ) {
-                Text("SAFETY CODE", color = TextSecondary, fontSize = 10.sp, letterSpacing = 2.4.sp)
+                Text(
+                    "SAFETY CODE",
+                    color = TextSecondary,
+                    fontSize = 10.sp,
+                    letterSpacing = 2.4.sp
+                )
                 Spacer(Modifier.height(10.dp))
                 Text(
                     formatSafetyCode(state.safetyCode ?: "------"),
@@ -513,25 +788,34 @@ private fun VerifyScreen(state: M1BUiState, onTrust: () -> Unit, onCancel: () ->
 
         Spacer(Modifier.height(18.dp))
         Text(
-            "If the code matches on both devices,\nyou can trust this peer.",
+            "Matching codes confirm that this secure session\nhas not been silently substituted.",
             color = TextSecondary,
             fontSize = 13.sp,
             textAlign = TextAlign.Center
         )
+
         Spacer(Modifier.weight(1f))
         Button(
             onClick = onTrust,
             modifier = Modifier.fillMaxWidth().height(56.dp),
             shape = RoundedCornerShape(18.dp),
-            colors = ButtonDefaults.buttonColors(containerColor = TelemetryCyan, contentColor = Ink)
+            colors = ButtonDefaults.buttonColors(
+                containerColor = TelemetryCyan,
+                contentColor = Ink
+            )
         ) {
             Text("✓  Codes match · Trust peer", fontWeight = FontWeight.Bold)
         }
         Spacer(Modifier.height(8.dp))
         Button(
             onClick = onCancel,
-            colors = ButtonDefaults.buttonColors(containerColor = Color.Transparent, contentColor = TelemetryBlue)
-        ) { Text("Cancel") }
+            colors = ButtonDefaults.buttonColors(
+                containerColor = Color.Transparent,
+                contentColor = TelemetryBlue
+            )
+        ) {
+            Text("Cancel")
+        }
     }
 }
 
@@ -540,19 +824,20 @@ private fun ChatScreen(
     state: M1BUiState,
     onDraft: (String) -> Unit,
     onSend: () -> Unit,
-    onDiscover: () -> Unit,
-    onChat: () -> Unit,
-    onHome: () -> Unit
+    onMessages: () -> Unit,
+    onNearby: () -> Unit,
+    onNetwork: () -> Unit,
+    onSettings: () -> Unit
 ) {
     Scaffold(
         containerColor = Color.Transparent,
         bottomBar = {
             TelemetryBottomBar(
-                active = "Chat",
-                chatEnabled = true,
-                onDiscover = onDiscover,
-                onChat = onChat,
-                onHome = onHome
+                active = "Messages",
+                onMessages = onMessages,
+                onNearby = onNearby,
+                onNetwork = onNetwork,
+                onSettings = onSettings
             )
         }
     ) { padding ->
@@ -561,43 +846,69 @@ private fun ChatScreen(
                 modifier = Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 14.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Text("‹", color = TextPrimary, fontSize = 32.sp)
+                Text(
+                    "‹",
+                    color = TextPrimary,
+                    fontSize = 32.sp,
+                    modifier = Modifier.clickable(onClick = onMessages)
+                )
                 Spacer(Modifier.width(10.dp))
                 Box(
                     modifier = Modifier.size(42.dp).background(Color(0xFF243751), CircleShape),
                     contentAlignment = Alignment.Center
-                ) { Text("P", color = TextPrimary, fontWeight = FontWeight.SemiBold) }
+                ) {
+                    Text("P", color = TextPrimary, fontWeight = FontWeight.SemiBold)
+                }
                 Spacer(Modifier.width(12.dp))
                 Column(modifier = Modifier.weight(1f)) {
                     Text(
-                        state.trustedDeviceId?.let { "peer-${it.takeLast(4)}" } ?: "secure peer",
+                        peerAlias(state),
                         color = TextPrimary,
                         fontWeight = FontWeight.SemiBold,
                         fontSize = 17.sp
                     )
                     Row(verticalAlignment = Alignment.CenterVertically) {
-                        Box(modifier = Modifier.size(7.dp).background(TelemetryCyan, CircleShape))
+                        Box(
+                            modifier = Modifier
+                                .size(7.dp)
+                                .background(TelemetryCyan, CircleShape)
+                        )
                         Spacer(Modifier.width(5.dp))
-                        Text("Offline · Encrypted", color = TelemetryCyan, fontSize = 12.sp)
+                        Text(
+                            "Offline · Encrypted",
+                            color = TelemetryCyan,
+                            fontSize = 12.sp
+                        )
                     }
                 }
-                Text("⋮", color = TextSecondary, fontSize = 26.sp)
+                Text("Direct", color = TextSecondary, fontSize = 11.sp)
             }
 
             Box(modifier = Modifier.fillMaxWidth().height(1.dp).background(Divider))
 
             if (state.messages.isEmpty()) {
                 Column(
-                    modifier = Modifier.weight(1f).fillMaxWidth().padding(28.dp),
+                    modifier = Modifier
+                        .weight(1f)
+                        .fillMaxWidth()
+                        .padding(28.dp),
                     horizontalAlignment = Alignment.CenterHorizontally,
                     verticalArrangement = Arrangement.Center
                 ) {
                     Box(
-                        modifier = Modifier.size(64.dp).background(Color(0xFF10334C), CircleShape),
+                        modifier = Modifier
+                            .size(64.dp)
+                            .background(Color(0xFF10334C), CircleShape),
                         contentAlignment = Alignment.Center
-                    ) { Text("▣", color = TelemetryCyan, fontSize = 27.sp) }
+                    ) {
+                        Text("▣", color = TelemetryCyan, fontSize = 27.sp)
+                    }
                     Spacer(Modifier.height(16.dp))
-                    Text("Secure offline channel ready", color = TextPrimary, fontWeight = FontWeight.SemiBold)
+                    Text(
+                        "Secure offline channel ready",
+                        color = TextPrimary,
+                        fontWeight = FontWeight.SemiBold
+                    )
                     Spacer(Modifier.height(6.dp))
                     Text(
                         "Messages are encrypted on-device and sent directly over the local radio link.",
@@ -608,7 +919,10 @@ private fun ChatScreen(
                 }
             } else {
                 LazyColumn(
-                    modifier = Modifier.weight(1f).fillMaxWidth().padding(horizontal = 14.dp),
+                    modifier = Modifier
+                        .weight(1f)
+                        .fillMaxWidth()
+                        .padding(horizontal = 14.dp),
                     verticalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
                     item {
@@ -620,7 +934,9 @@ private fun ChatScreen(
                             fontSize = 11.sp
                         )
                     }
-                    items(state.messages) { message -> MessageBubble(message) }
+                    items(state.messages) { message ->
+                        MessageBubble(message)
+                    }
                 }
             }
 
@@ -656,12 +972,674 @@ private fun ChatScreen(
                         enabled = state.draft.isNotBlank() && state.connectedAddress != null,
                         modifier = Modifier.size(54.dp),
                         shape = CircleShape,
-                        contentPadding = ButtonDefaults.ContentPadding,
                         colors = ButtonDefaults.buttonColors(containerColor = TelemetryBlue)
-                    ) { Text("➤", color = Color.White, fontSize = 20.sp) }
+                    ) {
+                        Text("➤", color = Color.White, fontSize = 20.sp)
+                    }
                 }
             }
         }
+    }
+}
+
+@Composable
+private fun NetworkScreen(
+    state: M1BUiState,
+    onNearby: () -> Unit,
+    onMessages: () -> Unit,
+    onNetwork: () -> Unit,
+    onSettings: () -> Unit
+) {
+    Scaffold(
+        containerColor = Color.Transparent,
+        bottomBar = {
+            TelemetryBottomBar(
+                active = "Network",
+                onMessages = onMessages,
+                onNearby = onNearby,
+                onNetwork = onNetwork,
+                onSettings = onSettings
+            )
+        }
+    ) { padding ->
+        LazyColumn(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(padding)
+                .padding(horizontal = 20.dp, vertical = 14.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            item {
+                Text(
+                    "Offline Network",
+                    color = TextPrimary,
+                    fontSize = 28.sp,
+                    fontWeight = FontWeight.Bold
+                )
+                Text(
+                    "Live local transport and secure-session status.",
+                    color = TextSecondary,
+                    fontSize = 13.sp
+                )
+                Spacer(Modifier.height(8.dp))
+            }
+            item {
+                NetworkMetric(
+                    "Bluetooth",
+                    if (state.discoveryActive) "Active" else "Ready",
+                    if (state.discoveryActive) TelemetryCyan else TextSecondary
+                )
+            }
+            item {
+                NetworkMetric(
+                    "Nearby peers",
+                    state.peers.size.toString(),
+                    if (state.peers.isNotEmpty()) TelemetryCyan else TextSecondary
+                )
+            }
+            item {
+                NetworkMetric(
+                    "Secure session",
+                    if (state.connectedAddress != null) "Trusted" else "None",
+                    if (state.connectedAddress != null) TelemetryCyan else TextSecondary
+                )
+            }
+            item {
+                NetworkMetric(
+                    "Current route",
+                    if (state.connectedAddress != null) "Direct BLE" else "Waiting",
+                    TelemetryBlue
+                )
+            }
+            item { NetworkMetric("Encryption", "AES-256-GCM", TelemetryBlue) }
+            item { NetworkMetric("Key agreement", "X25519", TelemetryBlue) }
+            item {
+                PrimaryButton(
+                    "Open Nearby Scanner",
+                    onNearby,
+                    Modifier.fillMaxWidth()
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun SettingsScreen(
+    state: M1BUiState,
+    onMessages: () -> Unit,
+    onNearby: () -> Unit,
+    onNetwork: () -> Unit,
+    onSettings: () -> Unit
+) {
+    Scaffold(
+        containerColor = Color.Transparent,
+        bottomBar = {
+            TelemetryBottomBar(
+                active = "Settings",
+                onMessages = onMessages,
+                onNearby = onNearby,
+                onNetwork = onNetwork,
+                onSettings = onSettings
+            )
+        }
+    ) { padding ->
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(padding)
+                .padding(horizontal = 20.dp, vertical = 14.dp)
+        ) {
+            Text(
+                "Settings",
+                color = TextPrimary,
+                fontSize = 28.sp,
+                fontWeight = FontWeight.Bold
+            )
+            Text(
+                "Identity, privacy and radio controls.",
+                color = TextSecondary,
+                fontSize = 13.sp
+            )
+
+            Spacer(Modifier.height(18.dp))
+            SettingCard(
+                "Device identity",
+                state.localDeviceId.ifBlank { "Generating…" }
+            )
+            Spacer(Modifier.height(10.dp))
+            SettingCard(
+                "Privacy",
+                "Stable identity is never placed in BLE advertisements."
+            )
+            Spacer(Modifier.height(10.dp))
+            SettingCard(
+                "Cloud dependency",
+                "None for direct offline messaging."
+            )
+            Spacer(Modifier.height(10.dp))
+            SettingCard(
+                "Build",
+                "Telemetry Android 0.4.0 · UI v2"
+            )
+        }
+    }
+}
+
+@Composable
+private fun SosScreen(
+    state: M1BUiState,
+    onBack: () -> Unit,
+    onNearby: () -> Unit,
+    onTrigger: () -> Unit
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(
+                Brush.verticalGradient(
+                    listOf(Color(0xFF241017), Ink, Color(0xFF08080C))
+                )
+            )
+            .padding(22.dp)
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                "‹",
+                color = TextPrimary,
+                fontSize = 34.sp,
+                modifier = Modifier.clickable(onClick = onBack)
+            )
+            Spacer(Modifier.width(8.dp))
+            Text(
+                "SOS Broadcast",
+                color = TextPrimary,
+                fontSize = 26.sp,
+                fontWeight = FontWeight.Bold
+            )
+        }
+
+        Spacer(Modifier.height(24.dp))
+        Card(
+            colors = CardDefaults.cardColors(containerColor = SosRedDark),
+            shape = RoundedCornerShape(22.dp)
+        ) {
+            Column(modifier = Modifier.fillMaxWidth().padding(18.dp)) {
+                Text(
+                    "Emergency local alert",
+                    color = Color.White,
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 18.sp
+                )
+                Spacer(Modifier.height(6.dp))
+                Text(
+                    if (state.connectedAddress != null) {
+                        "Current route: encrypted direct peer. Hold the button for 2 seconds to send."
+                    } else {
+                        "No trusted peer is connected. Connect to a nearby Telemetry device first."
+                    },
+                    color = Color(0xFFFFC7CE),
+                    fontSize = 13.sp
+                )
+            }
+        }
+
+        Spacer(Modifier.height(22.dp))
+        StatusRow(
+            "Secure peer",
+            if (state.connectedAddress != null) peerAlias(state) else "Not connected",
+            state.connectedAddress != null
+        )
+        StatusRow(
+            "Encryption",
+            if (state.connectedAddress != null) "AES-256-GCM" else "Waiting",
+            state.connectedAddress != null
+        )
+        StatusRow(
+            "Route",
+            if (state.connectedAddress != null) "Direct BLE" else "Unavailable",
+            state.connectedAddress != null
+        )
+
+        state.sosStatus?.let {
+            Spacer(Modifier.height(14.dp))
+            Text(
+                it,
+                color = if (it.startsWith("Encrypted")) TelemetryCyan else Color(0xFFFFAAB4),
+                fontSize = 13.sp,
+                textAlign = TextAlign.Center,
+                modifier = Modifier.fillMaxWidth()
+            )
+        }
+
+        Spacer(Modifier.weight(1f))
+
+        HoldToSosButton(
+            enabled = state.connectedAddress != null,
+            onTriggered = onTrigger
+        )
+
+        Spacer(Modifier.height(12.dp))
+        if (state.connectedAddress == null) {
+            PrimaryButton(
+                "Find Nearby Devices",
+                onNearby,
+                Modifier.fillMaxWidth()
+            )
+        } else {
+            Text(
+                "Release before 2 seconds to cancel.",
+                color = TextSecondary,
+                fontSize = 11.sp,
+                textAlign = TextAlign.Center,
+                modifier = Modifier.fillMaxWidth()
+            )
+        }
+        Spacer(Modifier.height(16.dp))
+    }
+}
+
+@Composable
+private fun ScannerStatusCard(state: M1BUiState) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(containerColor = InkSoft),
+        shape = RoundedCornerShape(18.dp)
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(15.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(44.dp)
+                    .background(Color(0xFF12345C), CircleShape),
+                contentAlignment = Alignment.Center
+            ) {
+                Text("ᛒ", color = TelemetryBlue, fontSize = 21.sp)
+            }
+            Spacer(Modifier.width(12.dp))
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    if (state.discoveryActive) "Scanning for devices…" else "Scanner paused",
+                    color = TextPrimary,
+                    fontWeight = FontWeight.Medium
+                )
+                Text(
+                    "${state.peers.size} found · advertising ${if (state.advertising) "on" else "off"}",
+                    color = TextSecondary,
+                    fontSize = 12.sp
+                )
+            }
+            Box(
+                modifier = Modifier
+                    .size(10.dp)
+                    .background(
+                        if (state.discoveryActive) TelemetryCyan else TextSecondary,
+                        CircleShape
+                    )
+            )
+        }
+    }
+}
+
+@Composable
+private fun EmptyDiscoveryCard(
+    state: M1BUiState,
+    onScanAgain: () -> Unit,
+    onDiagnostics: () -> Unit
+) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(containerColor = InkRaised),
+        shape = RoundedCornerShape(18.dp)
+    ) {
+        Column(
+            modifier = Modifier.fillMaxWidth().padding(20.dp),
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            Text("◌", color = TextSecondary, fontSize = 40.sp)
+            Spacer(Modifier.height(8.dp))
+            Text(
+                "No Telemetry devices found",
+                color = TextPrimary,
+                fontWeight = FontWeight.SemiBold
+            )
+            Spacer(Modifier.height(12.dp))
+            TroubleshootLine("Bluetooth", if (state.discoveryActive) "Scanning" else "Ready")
+            TroubleshootLine("Permission", if (state.status.contains("permission", true)) "Check" else "Granted")
+            TroubleshootLine("Advertising", if (state.advertising) "Active" else "Unavailable / paused")
+            TroubleshootLine("Internet", "Not required")
+            Spacer(Modifier.height(14.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Button(
+                    onClick = onScanAgain,
+                    colors = ButtonDefaults.buttonColors(containerColor = TelemetryBlue)
+                ) {
+                    Text("Scan Again")
+                }
+                Button(
+                    onClick = onDiagnostics,
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = InkSoft,
+                        contentColor = TextPrimary
+                    )
+                ) {
+                    Text("Diagnostics")
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun DiagnosticsCard(state: M1BUiState) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(containerColor = Color(0xFF0B2233)),
+        shape = RoundedCornerShape(16.dp)
+    ) {
+        Column(modifier = Modifier.padding(14.dp)) {
+            Text(
+                "Network Diagnostics",
+                color = TelemetryBlue,
+                fontWeight = FontWeight.SemiBold
+            )
+            Spacer(Modifier.height(8.dp))
+            DiagnosticLine("BLE scan", if (state.discoveryActive) "active" else "stopped")
+            DiagnosticLine("Advertising", if (state.advertising) "active" else "off")
+            DiagnosticLine("Peers", state.peers.size.toString())
+            DiagnosticLine("Secure session", if (state.connectedAddress != null) "trusted" else "none")
+            DiagnosticLine("Transport", "BLE GATT")
+            DiagnosticLine("Encryption", "AES-256-GCM / X25519")
+        }
+    }
+}
+
+@Composable
+private fun ConversationCard(state: M1BUiState, onOpenChat: () -> Unit) {
+    val latest = state.messages.lastOrNull()
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onOpenChat),
+        colors = CardDefaults.cardColors(containerColor = InkRaised),
+        shape = RoundedCornerShape(20.dp)
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(14.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(50.dp)
+                    .background(Color(0xFF243751), CircleShape),
+                contentAlignment = Alignment.Center
+            ) {
+                Text("P", color = TextPrimary, fontWeight = FontWeight.Bold)
+            }
+            Spacer(Modifier.width(12.dp))
+            Column(modifier = Modifier.weight(1f)) {
+                Row(modifier = Modifier.fillMaxWidth()) {
+                    Text(
+                        peerAlias(state),
+                        color = TextPrimary,
+                        fontWeight = FontWeight.SemiBold,
+                        modifier = Modifier.weight(1f)
+                    )
+                    Text(
+                        latest?.time ?: "Nearby",
+                        color = TextSecondary,
+                        fontSize = 11.sp
+                    )
+                }
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    latest?.text ?: "Secure offline session ready",
+                    color = TextSecondary,
+                    fontSize = 13.sp,
+                    maxLines = 1
+                )
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    "● Nearby · Direct",
+                    color = TelemetryCyan,
+                    fontSize = 10.sp
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun EmptyInboxCard(onNearby: () -> Unit) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(containerColor = InkRaised),
+        shape = RoundedCornerShape(20.dp)
+    ) {
+        Column(
+            modifier = Modifier.fillMaxWidth().padding(22.dp),
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            Text("◫", color = TelemetryBlue, fontSize = 30.sp)
+            Spacer(Modifier.height(8.dp))
+            Text(
+                "No conversations yet",
+                color = TextPrimary,
+                fontWeight = FontWeight.SemiBold
+            )
+            Text(
+                "Find a nearby Telemetry device to start an encrypted offline chat.",
+                color = TextSecondary,
+                fontSize = 12.sp,
+                textAlign = TextAlign.Center
+            )
+            Spacer(Modifier.height(12.dp))
+            Button(
+                onClick = onNearby,
+                colors = ButtonDefaults.buttonColors(containerColor = TelemetryBlue)
+            ) {
+                Text("Find Nearby")
+            }
+        }
+    }
+}
+
+@Composable
+private fun PeerCardV2(peer: PeerCandidate, onConnect: (PeerCandidate) -> Unit) {
+    val strength = signalLabel(peer.rssi)
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(containerColor = InkRaised),
+        shape = RoundedCornerShape(18.dp)
+    ) {
+        Column(modifier = Modifier.fillMaxWidth().padding(14.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Box(
+                    modifier = Modifier
+                        .size(44.dp)
+                        .background(Color(0xFF1B2F48), RoundedCornerShape(13.dp)),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text("▯", color = TextSecondary, fontSize = 22.sp)
+                }
+                Spacer(Modifier.width(12.dp))
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        peer.ephemeralId,
+                        color = TextPrimary,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                    Text(
+                        "Potential Telemetry device",
+                        color = TelemetryBlue,
+                        fontSize = 11.sp
+                    )
+                }
+                Button(
+                    onClick = { onConnect(peer) },
+                    shape = RoundedCornerShape(14.dp),
+                    colors = ButtonDefaults.buttonColors(containerColor = TelemetryBlue)
+                ) {
+                    Text("Connect", fontSize = 12.sp)
+                }
+            }
+            Spacer(Modifier.height(10.dp))
+            Row(modifier = Modifier.fillMaxWidth()) {
+                Text(
+                    "Signal: ${strength.first}",
+                    color = strength.second,
+                    fontSize = 11.sp,
+                    modifier = Modifier.weight(1f)
+                )
+                Text(
+                    "RSSI ${peer.rssi} dBm",
+                    color = TextSecondary,
+                    fontSize = 11.sp
+                )
+            }
+            Spacer(Modifier.height(4.dp))
+            Text(
+                "Ephemeral discovery ID · stable identity hidden until secure handshake",
+                color = Color(0xFF627A96),
+                fontSize = 9.sp
+            )
+        }
+    }
+}
+
+@Composable
+private fun MessageBubble(message: ChatMessage) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = if (message.outgoing) Arrangement.End else Arrangement.Start
+    ) {
+        Column(
+            horizontalAlignment = if (message.outgoing) Alignment.End else Alignment.Start
+        ) {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth(0.78f)
+                    .background(
+                        when {
+                            message.emergency -> SosRed
+                            message.outgoing -> TelemetryBlue
+                            else -> InkSoft
+                        },
+                        RoundedCornerShape(18.dp)
+                    )
+                    .padding(horizontal = 14.dp, vertical = 11.dp)
+            ) {
+                Column {
+                    Text(
+                        message.text,
+                        color = TextPrimary,
+                        fontSize = 14.sp,
+                        lineHeight = 20.sp
+                    )
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        if (message.outgoing && message.delivered) {
+                            "${message.time}  ✓✓"
+                        } else {
+                            message.time
+                        },
+                        color = if (message.outgoing) Color(0xFFD8E7FF) else TextSecondary,
+                        fontSize = 10.sp,
+                        modifier = Modifier.align(Alignment.End)
+                    )
+                }
+            }
+            if (message.outgoing && message.delivered) {
+                Text(
+                    "Delivered · signed receipt verified",
+                    color = TextSecondary,
+                    fontSize = 9.sp,
+                    modifier = Modifier.padding(top = 3.dp, end = 4.dp)
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun TelemetryBottomBar(
+    active: String,
+    onMessages: () -> Unit,
+    onNearby: () -> Unit,
+    onNetwork: () -> Unit,
+    onSettings: () -> Unit
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(Color(0xEE081421))
+            .padding(horizontal = 10.dp, vertical = 9.dp),
+        horizontalArrangement = Arrangement.SpaceEvenly
+    ) {
+        BottomItem("◫", "Messages", active == "Messages", onMessages)
+        BottomItem("◎", "Nearby", active == "Nearby", onNearby)
+        BottomItem("⌁", "Network", active == "Network", onNetwork)
+        BottomItem("⚙", "Settings", active == "Settings", onSettings)
+    }
+}
+
+@Composable
+private fun BottomItem(
+    icon: String,
+    label: String,
+    active: Boolean,
+    onClick: () -> Unit
+) {
+    Button(
+        onClick = onClick,
+        colors = ButtonDefaults.buttonColors(
+            containerColor = if (active) Color(0xFF122B45) else Color.Transparent,
+            contentColor = if (active) TelemetryBlue else TextSecondary
+        ),
+        shape = RoundedCornerShape(16.dp)
+    ) {
+        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+            Text(icon, fontSize = 18.sp)
+            Text(label, fontSize = 9.sp)
+        }
+    }
+}
+
+@Composable
+private fun FilterChip(
+    label: String,
+    active: Boolean,
+    onClick: () -> Unit
+) {
+    Button(
+        onClick = onClick,
+        colors = ButtonDefaults.buttonColors(
+            containerColor = if (active) Color(0xFF173451) else InkRaised,
+            contentColor = if (active) TextPrimary else TextSecondary
+        ),
+        shape = RoundedCornerShape(20.dp)
+    ) {
+        Text(label, fontSize = 12.sp)
+    }
+}
+
+@Composable
+private fun StaticSearchField(placeholder: String) {
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(52.dp)
+            .background(InkRaised, RoundedCornerShape(18.dp))
+            .border(1.dp, Divider, RoundedCornerShape(18.dp))
+            .padding(horizontal = 16.dp),
+        contentAlignment = Alignment.CenterStart
+    ) {
+        Text("⌕  $placeholder", color = TextSecondary, fontSize = 14.sp)
     }
 }
 
@@ -706,86 +1684,39 @@ private fun TelemetryMark(sizeDp: Int) {
 }
 
 @Composable
-private fun FeatureMini(icon: String, title: String, subtitle: String) {
-    Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.width(96.dp)) {
-        Text(icon, color = TelemetryBlue, fontSize = 25.sp)
-        Spacer(Modifier.height(7.dp))
-        Text(title, color = TextPrimary, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
-        Text(subtitle, color = TextSecondary, fontSize = 10.sp, textAlign = TextAlign.Center)
-    }
-}
-
-@Composable
-private fun PrimaryButton(label: String, onClick: () -> Unit, modifier: Modifier = Modifier) {
+private fun PrimaryButton(
+    label: String,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier
+) {
     Button(
         onClick = onClick,
-        modifier = modifier.height(58.dp),
-        shape = RoundedCornerShape(20.dp),
+        modifier = modifier.height(56.dp),
+        shape = RoundedCornerShape(18.dp),
         colors = ButtonDefaults.buttonColors(containerColor = TelemetryBlue)
     ) {
-        Text(label, color = Color.White, fontWeight = FontWeight.SemiBold, fontSize = 16.sp)
+        Text(
+            label,
+            color = Color.White,
+            fontWeight = FontWeight.SemiBold,
+            fontSize = 15.sp
+        )
     }
 }
 
 @Composable
-private fun EmptyDiscoveryCard() {
-    Card(
-        modifier = Modifier.fillMaxWidth(),
-        colors = CardDefaults.cardColors(containerColor = InkRaised),
-        shape = RoundedCornerShape(18.dp)
-    ) {
-        Column(
-            modifier = Modifier.fillMaxWidth().padding(24.dp),
-            horizontalAlignment = Alignment.CenterHorizontally
-        ) {
-            Text("◌", color = TelemetryBlue, fontSize = 32.sp)
-            Spacer(Modifier.height(8.dp))
-            Text("Looking for Telemetry peers", color = TextPrimary, fontWeight = FontWeight.Medium)
-            Text("Keep Bluetooth on. No internet connection is required.", color = TextSecondary, fontSize = 12.sp, textAlign = TextAlign.Center)
-        }
-    }
-}
-
-@Composable
-private fun PeerCard(peer: PeerCandidate, onConnect: (PeerCandidate) -> Unit) {
-    Card(
-        modifier = Modifier.fillMaxWidth(),
-        colors = CardDefaults.cardColors(containerColor = InkRaised),
-        shape = RoundedCornerShape(18.dp)
-    ) {
-        Row(
-            modifier = Modifier.fillMaxWidth().padding(14.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Box(
-                modifier = Modifier.size(44.dp).background(Color(0xFF1B2F48), RoundedCornerShape(13.dp)),
-                contentAlignment = Alignment.Center
-            ) { Text("▯", color = TextSecondary, fontSize = 22.sp) }
-            Spacer(Modifier.width(12.dp))
-            Column(modifier = Modifier.weight(1f)) {
-                Text(peer.ephemeralId, color = TextPrimary, fontWeight = FontWeight.SemiBold)
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Box(modifier = Modifier.size(6.dp).background(TelemetryCyan, CircleShape))
-                    Spacer(Modifier.width(5.dp))
-                    Text("Nearby · ${peer.rssi} dBm", color = TextSecondary, fontSize = 11.sp)
-                }
-            }
-            Button(
-                onClick = { onConnect(peer) },
-                shape = RoundedCornerShape(14.dp),
-                colors = ButtonDefaults.buttonColors(containerColor = TelemetryBlue)
-            ) { Text("Connect  ›", fontSize = 12.sp) }
-        }
-    }
-}
-
-@Composable
-private fun DeviceCircle(icon: String, label: String, detail: String) {
+private fun DeviceCircle(
+    icon: String,
+    label: String,
+    detail: String
+) {
     Column(horizontalAlignment = Alignment.CenterHorizontally) {
         Box(
             modifier = Modifier.size(74.dp).background(Color(0xFF12324F), CircleShape),
             contentAlignment = Alignment.Center
-        ) { Text(icon, color = TelemetryBlue, fontSize = 30.sp) }
+        ) {
+            Text(icon, color = TelemetryBlue, fontSize = 30.sp)
+        }
         Spacer(Modifier.height(8.dp))
         Text(label, color = TextSecondary, fontSize = 11.sp)
         Text(detail, color = TextPrimary, fontSize = 12.sp)
@@ -793,83 +1724,154 @@ private fun DeviceCircle(icon: String, label: String, detail: String) {
 }
 
 @Composable
-private fun MessageBubble(message: ChatMessage) {
-    Row(
+private fun NetworkMetric(
+    label: String,
+    value: String,
+    accent: Color
+) {
+    Card(
         modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = if (message.outgoing) Arrangement.End else Arrangement.Start
+        colors = CardDefaults.cardColors(containerColor = InkRaised),
+        shape = RoundedCornerShape(18.dp)
     ) {
-        Column(horizontalAlignment = if (message.outgoing) Alignment.End else Alignment.Start) {
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth(0.78f)
-                    .background(
-                        if (message.outgoing) TelemetryBlue else InkSoft,
-                        RoundedCornerShape(18.dp)
-                    )
-                    .padding(horizontal = 14.dp, vertical = 11.dp)
-            ) {
-                Column {
-                    Text(message.text, color = TextPrimary, fontSize = 14.sp, lineHeight = 20.sp)
-                    Spacer(Modifier.height(4.dp))
-                    Text(
-                        if (message.outgoing && message.delivered) "${message.time}  ✓✓" else message.time,
-                        color = if (message.outgoing) Color(0xFFD8E7FF) else TextSecondary,
-                        fontSize = 10.sp,
-                        modifier = Modifier.align(Alignment.End)
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(16.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                label,
+                color = TextPrimary,
+                modifier = Modifier.weight(1f)
+            )
+            Text(
+                value,
+                color = accent,
+                fontWeight = FontWeight.SemiBold
+            )
+        }
+    }
+}
+
+@Composable
+private fun SettingCard(
+    title: String,
+    detail: String
+) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(containerColor = InkRaised),
+        shape = RoundedCornerShape(18.dp)
+    ) {
+        Column(modifier = Modifier.fillMaxWidth().padding(16.dp)) {
+            Text(
+                title,
+                color = TextPrimary,
+                fontWeight = FontWeight.SemiBold
+            )
+            Spacer(Modifier.height(4.dp))
+            Text(
+                detail,
+                color = TextSecondary,
+                fontSize = 12.sp
+            )
+        }
+    }
+}
+
+@Composable
+private fun HoldToSosButton(
+    enabled: Boolean,
+    onTriggered: () -> Unit
+) {
+    val background = if (enabled) SosRed else Color(0xFF5A3038)
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(96.dp)
+            .background(background, RoundedCornerShape(26.dp))
+            .pointerInput(enabled) {
+                if (enabled) {
+                    detectTapGestures(
+                        onPress = {
+                            val startedAt = System.currentTimeMillis()
+                            val released = tryAwaitRelease()
+                            val heldMs = System.currentTimeMillis() - startedAt
+                            if (released && heldMs >= 2000L) {
+                                onTriggered()
+                            }
+                        }
                     )
                 }
-            }
-            if (message.outgoing && message.delivered) {
-                Text(
-                    "Delivered · signed receipt verified",
-                    color = TextSecondary,
-                    fontSize = 9.sp,
-                    modifier = Modifier.padding(top = 3.dp, end = 4.dp)
-                )
-            }
-        }
-    }
-}
-
-@Composable
-private fun TelemetryBottomBar(
-    active: String,
-    chatEnabled: Boolean,
-    onDiscover: () -> Unit,
-    onChat: () -> Unit,
-    onHome: () -> Unit
-) {
-    Row(
-        modifier = Modifier.fillMaxWidth().background(Color(0xEE081421)).padding(horizontal = 20.dp, vertical = 10.dp),
-        horizontalArrangement = Arrangement.SpaceEvenly
-    ) {
-        BottomItem("◎", "Discover", active == "Discover", true, onDiscover)
-        BottomItem("◫", "Chat", active == "Chat", chatEnabled, onChat)
-        BottomItem("◇", "Device", false, true, onHome)
-    }
-}
-
-@Composable
-private fun BottomItem(icon: String, label: String, active: Boolean, enabled: Boolean, onClick: () -> Unit) {
-    Button(
-        onClick = onClick,
-        enabled = enabled,
-        colors = ButtonDefaults.buttonColors(
-            containerColor = Color.Transparent,
-            contentColor = if (active) TelemetryBlue else TextSecondary,
-            disabledContainerColor = Color.Transparent,
-            disabledContentColor = Color(0xFF44566D)
-        ),
-        contentPadding = ButtonDefaults.TextButtonContentPadding
+            },
+        contentAlignment = Alignment.Center
     ) {
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
-            Text(icon, fontSize = 20.sp)
-            Text(label, fontSize = 10.sp)
+            Text("⚠", color = Color.White, fontSize = 24.sp)
+            Text(
+                if (enabled) "HOLD 2 SECONDS TO SEND SOS" else "CONNECT A TRUSTED PEER FIRST",
+                color = Color.White,
+                fontWeight = FontWeight.Bold,
+                fontSize = 14.sp
+            )
         }
+    }
+}
+
+@Composable
+private fun StatusRow(
+    label: String,
+    value: String,
+    good: Boolean
+) {
+    Row(
+        modifier = Modifier.fillMaxWidth().padding(vertical = 7.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Box(
+            modifier = Modifier
+                .size(8.dp)
+                .background(if (good) TelemetryCyan else TextSecondary, CircleShape)
+        )
+        Spacer(Modifier.width(8.dp))
+        Text(label, color = TextSecondary, modifier = Modifier.weight(1f))
+        Text(value, color = TextPrimary, fontWeight = FontWeight.Medium)
+    }
+}
+
+@Composable
+private fun TroubleshootLine(label: String, value: String) {
+    Row(
+        modifier = Modifier.fillMaxWidth().padding(vertical = 3.dp)
+    ) {
+        Text(label, color = TextSecondary, modifier = Modifier.weight(1f))
+        Text(value, color = TextPrimary, fontSize = 12.sp)
+    }
+}
+
+@Composable
+private fun DiagnosticLine(label: String, value: String) {
+    Row(
+        modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp)
+    ) {
+        Text(label, color = TextSecondary, modifier = Modifier.weight(1f), fontSize = 11.sp)
+        Text(value, color = TextPrimary, fontSize = 11.sp)
     }
 }
 
 private fun formatSafetyCode(code: String): String {
     val clean = code.filter { it.isLetterOrDigit() }
-    return if (clean.length >= 6) "${clean.take(3)} ${clean.drop(3).take(3)}" else code
+    return if (clean.length >= 6) {
+        "${clean.take(3)} ${clean.drop(3).take(3)}"
+    } else {
+        code
+    }
 }
+
+private fun signalLabel(rssi: Int): Pair<String, Color> = when {
+    rssi >= -60 -> "Strong" to TelemetryCyan
+    rssi >= -72 -> "Fair" to Color(0xFFFFC857)
+    else -> "Weak" to Color(0xFFFF6B73)
+}
+
+private fun peerAlias(state: M1BUiState): String =
+    state.trustedDeviceId?.let { "peer-${it.takeLast(4)}" } ?: "secure peer"
