@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<shortcuts xmlns:android="http://schemas.android.com/apk/res/android">
+    <shortcut
+        android:shortcutId="check_update"
+        android:enabled="true"
+        android:icon="@android:drawable/stat_sys_download_done"
+        android:shortcutShortLabel="@string/shortcut_check_update_short"
+        android:shortcutLongLabel="@string/shortcut_check_update_long">
+        <intent
+            android:action="com.telemetry.preview.CHECK_UPDATE"
+            android:targetPackage="com.telemetry.preview"
+            android:targetClass="com.telemetry.app.update.UpdateGateActivity" />
+    </shortcut>
+</shortcuts>
