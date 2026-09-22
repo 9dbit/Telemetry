@@ -27,6 +27,7 @@
   ],
   "android": {
     "minSdk": 26,
+    "compileSdk": 37,
     "targetSdk": 36,
     "m1aTransport": "ble",
     "futureTransports": ["wifi-aware", "wifi-direct", "internet"]
