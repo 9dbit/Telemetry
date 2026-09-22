@@ -23,7 +23,7 @@ test('Android UI v2 exposes messages, nearby diagnostics, network and SOS withou
     'SOS Broadcast',
     'HOLD 2 SECONDS TO SEND SOS',
     'Stable identity is never placed in BLE advertisements.',
-    'No internet required'
+    'Find Telemetry peers without internet.'
   ]) {
     assert.ok(source.includes(copy), `missing UI v2 contract copy: ${copy}`);
   }
