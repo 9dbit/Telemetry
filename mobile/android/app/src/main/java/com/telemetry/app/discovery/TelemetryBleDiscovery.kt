@@ -14,7 +14,7 @@ import android.content.Context
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.ParcelUuid
-import java.util.UUID
+import com.telemetry.app.transport.TelemetryGattTransport
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicInteger
 
@@ -26,10 +26,7 @@ class TelemetryBleDiscovery(
     private val adapter get() = bluetoothManager.adapter
     private val peerLabels = ConcurrentHashMap<String, String>()
     private val peerCounter = AtomicInteger(1)
-
-    private val serviceUuid = ParcelUuid(
-        UUID.fromString("f0a0c0de-7e1e-4e7f-9a11-54454c454d59")
-    )
+    private val serviceUuid = ParcelUuid(TelemetryGattTransport.SERVICE_UUID)
 
     private val scanCallback = object : ScanCallback() {
         @SuppressLint("MissingPermission")
@@ -42,6 +39,7 @@ class TelemetryBleDiscovery(
                 DiscoveryEvent.PeerSeen(
                     PeerCandidate(
                         ephemeralId = ephemeralId,
+                        radioAddress = localKey,
                         rssi = result.rssi,
                         lastSeenAtMs = System.currentTimeMillis()
                     )
@@ -66,34 +64,26 @@ class TelemetryBleDiscovery(
             onEvent(DiscoveryEvent.Error("Nearby-device permission is required"))
             return
         }
-
         val currentAdapter = adapter
         if (currentAdapter == null || !currentAdapter.isEnabled) {
             onEvent(DiscoveryEvent.Error("Bluetooth is unavailable or disabled"))
             return
         }
-
         val scanner = currentAdapter.bluetoothLeScanner
         if (scanner == null) {
             onEvent(DiscoveryEvent.Error("BLE scanner unavailable"))
             return
         }
-
-        val filter = ScanFilter.Builder()
-            .setServiceUuid(serviceUuid)
-            .build()
-        val settings = ScanSettings.Builder()
-            .setScanMode(ScanSettings.SCAN_MODE_BALANCED)
-            .build()
-
+        val filter = ScanFilter.Builder().setServiceUuid(serviceUuid).build()
+        val settings = ScanSettings.Builder().setScanMode(ScanSettings.SCAN_MODE_BALANCED).build()
         scanner.startScan(listOf(filter), settings, scanCallback)
 
         val advertiser = currentAdapter.bluetoothLeAdvertiser
         if (advertiser != null) {
             val advertiseSettings = AdvertiseSettings.Builder()
-                .setAdvertiseMode(AdvertiseSettings.ADVERTISE_MODE_LOW_POWER)
-                .setTxPowerLevel(AdvertiseSettings.ADVERTISE_TX_POWER_LOW)
-                .setConnectable(false)
+                .setAdvertiseMode(AdvertiseSettings.ADVERTISE_MODE_BALANCED)
+                .setTxPowerLevel(AdvertiseSettings.ADVERTISE_TX_POWER_MEDIUM)
+                .setConnectable(true)
                 .build()
             val advertiseData = AdvertiseData.Builder()
                 .setIncludeDeviceName(false)
@@ -101,7 +91,6 @@ class TelemetryBleDiscovery(
                 .build()
             advertiser.startAdvertising(advertiseSettings, advertiseData, advertiseCallback)
         }
-
         onEvent(DiscoveryEvent.Started(advertising = advertiser != null))
     }
 
@@ -124,8 +113,6 @@ class TelemetryBleDiscovery(
         } else {
             arrayOf(Manifest.permission.ACCESS_FINE_LOCATION)
         }
-        return permissions.all {
-            context.checkSelfPermission(it) == PackageManager.PERMISSION_GRANTED
-        }
+        return permissions.all { context.checkSelfPermission(it) == PackageManager.PERMISSION_GRANTED }
     }
 }

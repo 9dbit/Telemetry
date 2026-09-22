@@ -1,11 +1,15 @@
 {
   "version": "telemetry-mobile/1",
-  "milestone": "M1A-offline-peer-discovery",
+  "milestone": "M1B-secure-offline-session",
   "principles": {
     "offlineFirst": true,
     "stableIdentityInAdvertisement": false,
+    "radioAddressPersisted": false,
     "cloudRequiredForDiscovery": false,
-    "relayPayloadVisibility": "opaque"
+    "cloudRequiredForSession": false,
+    "privateKeyLeavesDevice": false,
+    "relayPayloadVisibility": "opaque",
+    "manualSafetyCodeVerification": true
   },
   "stores": [
     "IdentityStore",
@@ -19,6 +23,17 @@
     "PeerSession",
     "DeliveryReceipt"
   ],
+  "session": {
+    "discovery": "ble",
+    "bootstrap": "ble-gatt",
+    "identitySigning": "Ed25519",
+    "keyAgreement": "ephemeral-X25519",
+    "kdf": "HKDF-SHA256",
+    "payloadEncryption": "AES-256-GCM",
+    "receiptSigning": "Ed25519",
+    "maxTextUtf8Bytes": 160,
+    "trustGate": "matching-safety-code"
+  },
   "discoveryEvents": [
     "started",
     "peer-seen",
@@ -30,6 +45,7 @@
     "compileSdk": 37,
     "targetSdk": 36,
     "m1aTransport": "ble",
+    "m1bTransport": "ble-gatt",
     "futureTransports": ["wifi-aware", "wifi-direct", "internet"]
   },
   "ios": {

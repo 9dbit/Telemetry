@@ -2,6 +2,7 @@ package com.telemetry.app.discovery
 
 data class PeerCandidate(
     val ephemeralId: String,
+    val radioAddress: String,
     val rssi: Int,
     val lastSeenAtMs: Long
 )
@@ -16,4 +17,5 @@ sealed interface DiscoveryEvent {
 object PresencePrivacyPolicy {
     const val STABLE_DEVICE_ID_IN_ADVERTISEMENT = false
     const val PRECISE_LOCATION_DERIVED_FROM_SCAN = false
+    const val RADIO_ADDRESS_PERSISTED = false
 }
