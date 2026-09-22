@@ -1,4 +1,4 @@
-name: Android M1A
+name: Android Mobile
 
 on:
   pull_request:
@@ -11,6 +11,7 @@ on:
     paths:
       - "mobile/android/**"
       - "mobile/contracts/**"
+      - ".github/workflows/android-m1a.yml"
 
 jobs:
   build-android:
@@ -24,5 +25,12 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: "9.6.0"
-      - name: Build and unit test M1A
+      - name: Build and unit test Android
         run: gradle -p mobile/android :app:testDebugUnitTest :app:assembleDebug --stacktrace
+      - name: Upload M1B debug APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: telemetry-android-m1b-debug
+          path: mobile/android/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
+          retention-days: 14
