@@ -1,0 +1,39 @@
+{
+  "version": "telemetry-mobile/1",
+  "milestone": "M1A-offline-peer-discovery",
+  "principles": {
+    "offlineFirst": true,
+    "stableIdentityInAdvertisement": false,
+    "cloudRequiredForDiscovery": false,
+    "relayPayloadVisibility": "opaque"
+  },
+  "stores": [
+    "IdentityStore",
+    "TrustStore",
+    "ReplayStore",
+    "MessageStore"
+  ],
+  "interfaces": [
+    "TransportAdapter",
+    "PeerDiscovery",
+    "PeerSession",
+    "DeliveryReceipt"
+  ],
+  "discoveryEvents": [
+    "started",
+    "peer-seen",
+    "error",
+    "stopped"
+  ],
+  "android": {
+    "minSdk": 26,
+    "compileSdk": 37,
+    "targetSdk": 36,
+    "m1aTransport": "ble",
+    "futureTransports": ["wifi-aware", "wifi-direct", "internet"]
+  },
+  "ios": {
+    "shell": "swift-swiftui",
+    "futureTransports": ["ble", "wifi-aware", "network-framework", "internet"]
+  }
+}
