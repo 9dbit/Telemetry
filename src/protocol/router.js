@@ -8,7 +8,8 @@ export function selectTransport({ payloadBytes = 0, transports = [] }) {
 
   const candidates = available
     .map((transport) => {
-      let score = 100 - Math.max(0, PRIORITY.indexOf(transport.id)) * 10;
+      const priorityIndex = PRIORITY.indexOf(transport.id);
+      let score = priorityIndex >= 0 ? 100 - priorityIndex * 10 : 20;
 
       if (transport.id === 'ble' && payloadBytes > 32_000) score -= 45;
       if (transport.id === 'lora' && payloadBytes > 2_000) score -= 55;
