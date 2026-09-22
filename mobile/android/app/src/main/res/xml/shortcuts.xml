@@ -4,8 +4,8 @@
         android:shortcutId="check_update"
         android:enabled="true"
         android:icon="@android:drawable/stat_sys_download_done"
-        android:shortcutShortLabel="Check Update"
-        android:shortcutLongLabel="Check Telemetry Update">
+        android:shortcutShortLabel="@string/shortcut_check_update_short"
+        android:shortcutLongLabel="@string/shortcut_check_update_long">
         <intent
             android:action="com.telemetry.preview.CHECK_UPDATE"
             android:targetPackage="com.telemetry.preview"
