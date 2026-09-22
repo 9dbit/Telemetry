@@ -1,5 +1,8 @@
 name: Android Mobile
 
+permissions:
+  contents: write
+
 on:
   pull_request:
     paths:
@@ -16,6 +19,9 @@ on:
 jobs:
   build-android:
     runs-on: ubuntu-latest
+    env:
+      TELEMETRY_VERSION_CODE: ${{ github.run_number }}
+      TELEMETRY_VERSION_NAME: 0.5.0-preview.${{ github.run_number }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-java@v4
@@ -27,10 +33,37 @@ jobs:
           gradle-version: "9.6.0"
       - name: Build and unit test Android
         run: gradle -p mobile/android :app:testDebugUnitTest :app:assembleDebug --stacktrace
-      - name: Upload M1B debug APK
+      - name: Upload preview debug APK
         uses: actions/upload-artifact@v4
         with:
-          name: telemetry-android-m1b-debug
+          name: telemetry-android-preview-debug
           path: mobile/android/app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
           retention-days: 14
+      - name: Publish preview update release
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          APK="mobile/android/app/build/outputs/apk/debug/app-debug.apk"
+          RELEASE_APK="Telemetry-Android-Preview.apk"
+          cp "$APK" "$RELEASE_APK"
+          SHA256="$(sha256sum "$RELEASE_APK" | awk '{print $1}')"
+          TAG="android-preview-${GITHUB_RUN_NUMBER}"
+          TITLE="Telemetry Android Preview ${TELEMETRY_VERSION_NAME}"
+          NOTES=$(cat <<TXT
+          Version-Code: ${TELEMETRY_VERSION_CODE}
+          Version-Name: ${TELEMETRY_VERSION_NAME}
+          SHA-256: ${SHA256}
+          Channel: preview
+
+          Automatic preview build from main. The APK is signed with the Telemetry Preview signing identity and is not the future Google Play production signing identity.
+          TXT
+          )
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" "$RELEASE_APK#Telemetry-Android-Preview.apk" --clobber
+            gh release edit "$TAG" --title "$TITLE" --notes "$NOTES" --latest
+          else
+            gh release create "$TAG" "$RELEASE_APK#Telemetry-Android-Preview.apk" --title "$TITLE" --notes "$NOTES" --latest
+          fi
