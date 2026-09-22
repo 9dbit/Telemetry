@@ -25,19 +25,24 @@ export function fingerprintPublicKey(publicKeyDer) {
   return createHash('sha256').update(publicKeyDer).digest('hex');
 }
 
+export function deviceIdFromSigningPublicKey(signingPublicKey) {
+  const fingerprint = fingerprintPublicKey(fromB64Url(signingPublicKey));
+  return `tlm:device:${fingerprint.slice(0, 32)}`;
+}
+
 export function generateDeviceIdentity() {
   const signing = generateKeyPairSync('ed25519');
   const exchange = generateKeyPairSync('x25519');
 
   const signingPublicDer = exportDer(signing.publicKey, 'spki');
   const exchangePublicDer = exportDer(exchange.publicKey, 'spki');
-  const fingerprint = fingerprintPublicKey(signingPublicDer);
+  const signingPublicKey = toB64Url(signingPublicDer);
 
   return {
     version: 1,
-    deviceId: `tlm:device:${fingerprint.slice(0, 32)}`,
+    deviceId: deviceIdFromSigningPublicKey(signingPublicKey),
     signing: {
-      publicKey: toB64Url(signingPublicDer),
+      publicKey: signingPublicKey,
       privateKey: toB64Url(exportDer(signing.privateKey, 'pkcs8'))
     },
     exchange: {
