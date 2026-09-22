@@ -24,7 +24,7 @@ test('payload encrypts and decrypts at destination', () => {
   assert.deepEqual(openPayload(b, sealed), { text: 'offline hello' });
 });
 
-test('signed envelope verifies and preserves opaque payload', () => {
+test('signed envelope verifies before and after relay forwarding', () => {
   const alice = generateDeviceIdentity();
   const bob = generateDeviceIdentity();
   const key = deriveSessionKey(alice, bob.exchange.publicKey);
@@ -37,15 +37,22 @@ test('signed envelope verifies and preserves opaque payload', () => {
   });
   assert.equal(verifyEnvelope(envelope, alice.signing.publicKey), true);
   assert.equal(envelope.payload.ciphertext.includes('secret'), false);
-  assert.equal(forwardEnvelope(envelope).hopCount, 1);
+
+  const forwarded = forwardEnvelope(envelope);
+  assert.equal(forwarded.hopCount, 1);
+  assert.equal(verifyEnvelope(forwarded, alice.signing.publicKey), true);
+
+  const tampered = { ...forwarded, recipientId: 'tlm:device:tampered' };
+  assert.equal(verifyEnvelope(tampered, alice.signing.publicKey), false);
 });
 
-test('transport router prefers local direct links', () => {
+test('transport router prefers local direct links and demotes unknown transports', () => {
   const route = selectTransport({
     payloadBytes: 500,
     transports: [
       { id: 'internet', available: true },
       { id: 'wifi-direct', available: true },
+      { id: 'mystery-radio', available: true, quality: 20 },
       { id: 'satellite-gateway', available: true }
     ]
   });
