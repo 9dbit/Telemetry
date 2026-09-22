@@ -11,7 +11,6 @@ function canonicalEnvelopeData(envelope) {
     senderId: envelope.senderId,
     recipientId: envelope.recipientId,
     createdAt: envelope.createdAt,
-    hopCount: envelope.hopCount,
     hopLimit: envelope.hopLimit,
     contentType: envelope.contentType,
     payload: envelope.payload
