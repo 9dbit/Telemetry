@@ -21,13 +21,13 @@ Telemetry is a resilient communications platform designed to keep people and dev
 
 ## Foundation architecture
 
-The first Railway deployment is the **control-plane foundation**, not the offline transport itself. Offline networking must continue to function independently of cloud availability.
+The Railway deployment is the **control-plane foundation**, not the offline transport itself. Offline networking must continue to function independently of cloud availability.
 
 ```text
 Telemetry App
-   |  local encrypted envelope
+   |  encrypted signed envelope
    v
-Transport Router
+Local Queue / Transport Router
    |-- BLE
    |-- Wi-Fi Direct / Wi-Fi Aware
    |-- Internet
@@ -42,6 +42,24 @@ Optional cloud control plane
    `-- software/config distribution
 ```
 
+## Telemetry Protocol v0.1
+
+The first protocol foundation is implemented in `src/protocol/`.
+
+Current primitives:
+
+- Ed25519 envelope signing.
+- X25519 peer key agreement.
+- HKDF-SHA256 session-key derivation.
+- AES-256-GCM encrypted payloads.
+- Signed transport-independent envelopes.
+- Hop count / hop limit metadata.
+- Store-and-forward queue lifecycle.
+- Transport policy scoring.
+- End-to-end development simulator.
+
+Full protocol notes: [`docs/PROTOCOL_V0_1.md`](docs/PROTOCOL_V0_1.md).
+
 ## Security principles
 
 - End-to-end encryption between conversation endpoints.
@@ -51,15 +69,29 @@ Optional cloud control plane
 - No dependency on Telemetry cloud for local message decryption.
 - Minimal metadata retention in the control plane.
 
+The current Node implementation is a protocol simulator. Production phone/device builds must move private-key storage into secure platform facilities such as Android Keystore or iOS Keychain / Secure Enclave where appropriate.
+
 ## Current endpoints
 
 - `GET /health`
 - `GET /api/v1/capabilities`
+- `GET /api/v1/protocol`
+- `POST /api/v1/route`
+- `POST /api/v1/simulate/message`
+
+Example simulation request:
+
+```json
+{
+  "text": "hello without internet"
+}
+```
 
 ## Run locally
 
 ```bash
 npm install
+npm test
 npm start
 ```
 
@@ -67,10 +99,12 @@ The service listens on `PORT` when provided, otherwise port `3000`.
 
 ## Next milestones
 
-- Define protocol envelope and message lifecycle.
-- Define device/node identity and cryptographic key model.
+- Pairing and trust handshake with QR verification.
+- Replay protection and message expiry.
+- Delivery-receipt envelopes.
+- Fragmentation/reassembly for constrained transports.
 - Build Android transport spike for BLE discovery.
-- Add Wi-Fi peer payload channel.
-- Implement local message queue and delivery receipts.
-- Create node/gateway simulator.
+- Add Wi-Fi Direct / Wi-Fi Aware peer payload channel.
+- Replace simulator queue with durable mobile storage adapter.
+- Create node/gateway simulator with multiple relay peers.
 - Add control-plane authentication, PostgreSQL and node registry only when the protocol boundary is stable.
