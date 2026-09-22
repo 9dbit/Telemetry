@@ -62,7 +62,7 @@ private sealed interface GateState {
 
 class UpdateGateActivity : ComponentActivity() {
     private var state by mutableStateOf<GateState>(GateState.Checking)
-    private var progress by mutableIntStateOf(0)
+    private var downloadProgress by mutableIntStateOf(0)
     private val manualMode get() = intent?.action == ACTION_CHECK_UPDATE
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -80,7 +80,7 @@ class UpdateGateActivity : ComponentActivity() {
             ) {
                 UpdateGateUi(
                     state = state,
-                    progress = progress,
+                    progress = downloadProgress,
                     onCheck = { checkForUpdate(force = true) },
                     onUpdate = ::downloadUpdate,
                     onInstall = ::installReadyUpdate,
@@ -139,11 +139,11 @@ class UpdateGateActivity : ComponentActivity() {
 
     private fun downloadUpdate(info: UpdateInfo) {
         state = GateState.Downloading(info)
-        progress = 0
+        downloadProgress = 0
         Thread {
             runCatching {
                 UpdateClient.download(this, info) { value ->
-                    runOnUiThread { progress = value }
+                    runOnUiThread { downloadProgress = value }
                 }
             }.onSuccess { file ->
                 runOnUiThread {
