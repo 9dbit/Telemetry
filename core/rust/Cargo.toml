@@ -1,0 +1,12 @@
+[package]
+name = "telemetry-core"
+version = "0.2.0"
+edition = "2021"
+description = "Portable Telemetry protocol contract core"
+license = "UNLICENSED"
+publish = false
+
+[lib]
+crate-type = ["lib", "staticlib", "cdylib"]
+
+[dependencies]
