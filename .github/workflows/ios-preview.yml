@@ -56,10 +56,19 @@ jobs:
             exit 1
           fi
           SCHEME=$(xcodebuild -workspace "$WORKSPACE" -list -json | python3 -c 'import json,sys; data=json.load(sys.stdin); print(data["workspace"]["schemes"][0])')
+          set +e
           xcodebuild \
             -workspace "$WORKSPACE" \
             -scheme "$SCHEME" \
             -sdk iphonesimulator \
             -configuration Debug \
             CODE_SIGNING_ALLOWED=NO \
-            build
+            build > /tmp/telemetry-xcode.log 2>&1
+          STATUS=$?
+          set -e
+          if [ "$STATUS" -ne 0 ]; then
+            echo "--- concise Xcode errors ---"
+            grep -E "TelemetryIosNative|error:|fatal error:" /tmp/telemetry-xcode.log | tail -n 180 || true
+            exit "$STATUS"
+          fi
+          echo "Xcode simulator compile passed"
