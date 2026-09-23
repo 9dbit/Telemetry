@@ -34,11 +34,17 @@ jobs:
 
   compile-ios-native:
     runs-on: macos-15
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_26.3.app/Contents/Developer
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: "22.13.1"
+      - name: Verify Xcode and Swift toolchain
+        run: |
+          xcodebuild -version
+          xcrun swift --version
       - name: Install JS dependencies
         working-directory: mobile/ios-preview
         run: npm install
@@ -55,7 +61,11 @@ jobs:
             echo "No Xcode workspace generated"
             exit 1
           fi
-          SCHEME=$(xcodebuild -workspace "$WORKSPACE" -list -json | python3 -c 'import json,sys; data=json.load(sys.stdin); print(data["workspace"]["schemes"][0])')
+          SCHEME="TelemetryiOSPreview"
+          if ! xcodebuild -workspace "$WORKSPACE" -list -json | python3 -c 'import json,sys; d=json.load(sys.stdin); assert "TelemetryiOSPreview" in d["workspace"]["schemes"], d["workspace"]["schemes"]'; then
+            echo "TelemetryiOSPreview app scheme was not generated"
+            exit 1
+          fi
           set +e
           xcodebuild \
             -workspace "$WORKSPACE" \
@@ -68,9 +78,9 @@ jobs:
           set -e
           if [ "$STATUS" -ne 0 ]; then
             echo "--- Xcode compiler/package errors ---"
-            grep -E -A 35 -B 5 "Could not resolve package dependencies|TelemetryIosNative|error:|fatal error:" /tmp/telemetry-xcode.log | tail -n 260 || true
+            grep -E -A 35 -B 5 "Could not resolve package dependencies|TelemetryIosNative|error:|fatal error:" /tmp/telemetry-xcode.log | tail -n 320 || true
             echo "--- Xcode log tail ---"
-            tail -n 140 /tmp/telemetry-xcode.log || true
+            tail -n 180 /tmp/telemetry-xcode.log || true
             exit "$STATUS"
           fi
           echo "Xcode simulator compile passed"
