@@ -1,20 +1,36 @@
 {
   "cli": {
-    "version": ">= 16.0.0"
+    "version": ">= 19.1.0",
+    "requireCommit": true,
+    "appVersionSource": "local"
   },
   "build": {
-    "development": {
+    "development-device": {
       "developmentClient": true,
       "distribution": "internal",
-      "ios": { "simulator": false }
+      "ios": {
+        "simulator": false
+      }
     },
-    "preview": {
+    "development-simulator": {
+      "developmentClient": true,
       "distribution": "internal",
-      "ios": { "simulator": false }
+      "ios": {
+        "simulator": true
+      }
+    },
+    "preview-device": {
+      "distribution": "internal",
+      "ios": {
+        "simulator": false
+      }
     },
     "testflight": {
       "distribution": "store",
       "autoIncrement": true
     }
+  },
+  "submit": {
+    "testflight": {}
   }
 }
