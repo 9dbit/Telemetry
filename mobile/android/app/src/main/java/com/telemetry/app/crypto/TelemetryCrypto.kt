@@ -125,10 +125,11 @@ object TelemetryCrypto {
     fun deriveSessionKey(
         localEphemeral: EphemeralKeyPair,
         localHello: SessionHello,
-        remoteHello: SessionHello
+        remoteHello: SessionHello,
+        now: Long = System.currentTimeMillis()
     ): ByteArray {
-        require(verifyHello(localHello)) { "local hello is invalid or expired" }
-        require(verifyHello(remoteHello)) { "remote hello is invalid or expired" }
+        require(verifyHello(localHello, now)) { "local hello is invalid or expired" }
+        require(verifyHello(remoteHello, now)) { "remote hello is invalid or expired" }
 
         val privateKey = X25519PrivateKeyParameters(localEphemeral.privateSeed, 0)
         val peerPublic = X25519PublicKeyParameters(remoteHello.ephemeralPublicKey, 0)
@@ -170,10 +171,11 @@ object TelemetryCrypto {
         recipientId: String,
         text: String,
         createdAt: Long = System.currentTimeMillis(),
-        messageId: String = UUID.randomUUID().toString()
+        messageId: String = UUID.randomUUID().toString(),
+        nonce: ByteArray = randomBytes(12)
     ): EncryptedMessage {
         require(sessionKey.size == 32)
-        val nonce = randomBytes(12)
+        require(nonce.size == 12)
         val cipher = Cipher.getInstance("AES/GCM/NoPadding")
         cipher.init(Cipher.ENCRYPT_MODE, SecretKeySpec(sessionKey, "AES"), GCMParameterSpec(128, nonce))
         cipher.updateAAD(messageAad(messageId, senderId, recipientId, createdAt))
