@@ -14,7 +14,8 @@
     "expo": "^57.0.0",
     "expo-dev-client": "~57.0.19",
     "react": "19.2.3",
-    "react-native": "0.86.0"
+    "react-native": "0.86.0",
+    "telemetry-ios-native": "file:./modules/telemetry-ios-native"
   },
   "devDependencies": {
     "@types/react": "^19.2.0",
