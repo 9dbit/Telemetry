@@ -1,0 +1,86 @@
+name: iOS Preview Contract
+
+on:
+  pull_request:
+    paths:
+      - "mobile/ios-preview/**"
+      - "mobile/contracts/**"
+      - "test/ios-preview-contract.test.js"
+      - ".github/workflows/ios-preview.yml"
+  push:
+    branches: [main]
+    paths:
+      - "mobile/ios-preview/**"
+      - "mobile/contracts/**"
+      - "test/ios-preview-contract.test.js"
+
+jobs:
+  validate-ios-preview:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22.13.1"
+      - name: Install iOS preview JS dependencies
+        working-directory: mobile/ios-preview
+        run: npm install
+      - name: Typecheck iOS preview shell
+        working-directory: mobile/ios-preview
+        run: npm run typecheck
+      - name: Expo dependency diagnostics
+        working-directory: mobile/ios-preview
+        run: npx expo-doctor@latest
+
+  compile-ios-native:
+    runs-on: macos-15
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_26.3.app/Contents/Developer
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22.13.1"
+      - name: Verify Xcode and Swift toolchain
+        run: |
+          xcodebuild -version
+          xcrun swift --version
+      - name: Install JS dependencies
+        working-directory: mobile/ios-preview
+        run: npm install
+      - name: Generate native iOS project
+        working-directory: mobile/ios-preview
+        run: npx expo prebuild --clean --platform ios
+      - name: Compile iOS simulator app
+        working-directory: mobile/ios-preview
+        shell: bash
+        run: |
+          set -euo pipefail
+          WORKSPACE=$(find ios -maxdepth 1 -name "*.xcworkspace" | head -n 1)
+          if [ -z "$WORKSPACE" ]; then
+            echo "No Xcode workspace generated"
+            exit 1
+          fi
+          SCHEME="TelemetryiOSPreview"
+          if ! xcodebuild -workspace "$WORKSPACE" -list -json | python3 -c 'import json,sys; d=json.load(sys.stdin); assert "TelemetryiOSPreview" in d["workspace"]["schemes"], d["workspace"]["schemes"]'; then
+            echo "TelemetryiOSPreview app scheme was not generated"
+            exit 1
+          fi
+          set +e
+          xcodebuild \
+            -workspace "$WORKSPACE" \
+            -scheme "$SCHEME" \
+            -sdk iphonesimulator \
+            -configuration Debug \
+            CODE_SIGNING_ALLOWED=NO \
+            build > /tmp/telemetry-xcode.log 2>&1
+          STATUS=$?
+          set -e
+          if [ "$STATUS" -ne 0 ]; then
+            echo "--- Xcode compiler/package errors ---"
+            grep -E -A 35 -B 5 "Could not resolve package dependencies|TelemetryIosNative|error:|fatal error:" /tmp/telemetry-xcode.log | tail -n 320 || true
+            echo "--- Xcode log tail ---"
+            tail -n 180 /tmp/telemetry-xcode.log || true
+            exit "$STATUS"
+          fi
+          echo "Xcode simulator compile passed"

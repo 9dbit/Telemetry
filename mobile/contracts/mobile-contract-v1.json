@@ -1,6 +1,6 @@
 {
   "version": "telemetry-mobile/1",
-  "milestone": "M1B-secure-offline-session",
+  "milestone": "M1B-secure-offline-session-cross-platform-preview",
   "principles": {
     "offlineFirst": true,
     "stableIdentityInAdvertisement": false,
@@ -11,18 +11,8 @@
     "relayPayloadVisibility": "opaque",
     "manualSafetyCodeVerification": true
   },
-  "stores": [
-    "IdentityStore",
-    "TrustStore",
-    "ReplayStore",
-    "MessageStore"
-  ],
-  "interfaces": [
-    "TransportAdapter",
-    "PeerDiscovery",
-    "PeerSession",
-    "DeliveryReceipt"
-  ],
+  "stores": ["IdentityStore", "TrustStore", "ReplayStore", "MessageStore"],
+  "interfaces": ["TransportAdapter", "PeerDiscovery", "PeerSession", "DeliveryReceipt"],
   "session": {
     "discovery": "ble",
     "bootstrap": "ble-gatt",
@@ -34,12 +24,7 @@
     "maxTextUtf8Bytes": 160,
     "trustGate": "matching-safety-code"
   },
-  "discoveryEvents": [
-    "started",
-    "peer-seen",
-    "error",
-    "stopped"
-  ],
+  "discoveryEvents": ["started", "peer-seen", "error", "stopped"],
   "android": {
     "minSdk": 26,
     "compileSdk": 37,
@@ -49,7 +34,18 @@
     "futureTransports": ["wifi-aware", "wifi-direct", "internet"]
   },
   "ios": {
-    "shell": "swift-swiftui",
-    "futureTransports": ["ble", "wifi-aware", "network-framework", "internet"]
+    "minimumOs": "16.4",
+    "trialRuntime": "expo-development-build",
+    "uiLayer": "react-native",
+    "nativeLayer": "swift-expo-module",
+    "nativeCrypto": "CryptoKit",
+    "m1Transport": "core-bluetooth-gatt",
+    "trialDistribution": ["eas-internal", "testflight"],
+    "wifiAware": {
+      "minimumOs": 26,
+      "minimumDevice": "iPhone 12",
+      "status": "planned-m1c"
+    },
+    "futureTransports": ["wifi-aware", "network-framework", "internet"]
   }
 }
