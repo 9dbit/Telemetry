@@ -1,0 +1,43 @@
+{
+  "version": "telemetry-m1b-interop/1",
+  "purpose": "Deterministic public test vector for Android BouncyCastle and iOS CryptoKit. Test-only seeds are not production secrets.",
+  "issuedAt": 1770000000000,
+  "partyA": {
+    "ed25519SeedHex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+    "x25519SeedHex": "202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f",
+    "ephemeralSeedHex": "808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f",
+    "nonceHex": "a0a1a2a3a4a5a6a7a8a9aaabacadaeaf",
+    "signingPublicHex": "03a107bff3ce10be1d70dd18e74bc09967e4d6309ba50d5f1ddc8664125531b8",
+    "exchangePublicHex": "358072d6365880d1aeea329adf9121383851ed21a28e3b75e965d0d2cd166254",
+    "ephemeralPublicHex": "493e82fc74464a59268817623d2053c5eb8e2cc4a988b4fee179ec6b010d531d",
+    "deviceId": "tlm:device:56475aa75463474c0285df5dbf2bcab7",
+    "helloSignatureHex": "3da54bf0bb0fc88e30e7086e064f84a06927ccb09abe3c69a2e2e459e3711d14d54f47129daf8892a690c4ed89b388ce5cf4915bbc51caeec07e0aaaa32f4a07"
+  },
+  "partyB": {
+    "ed25519SeedHex": "404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f",
+    "x25519SeedHex": "606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f",
+    "ephemeralSeedHex": "a0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebf",
+    "nonceHex": "b0b1b2b3b4b5b6b7b8b9babbbcbdbebf",
+    "signingPublicHex": "2543b92ff1095511476adc8369db6ddc933665a11978dda1404ee1066ca9559d",
+    "exchangePublicHex": "675dd574ed7789310b3d2e7681f3790b466c773b1521fecf36577958371ea52f",
+    "ephemeralPublicHex": "605a725d2a4adfeeb1a29e17edd621c1b7593ee8cdbc44ac6c4ab6e2f805d23c",
+    "deviceId": "tlm:device:03396219237f75a64f12aeb7f39723ab",
+    "helloSignatureHex": "81ef660db42bb996515a59a91f28f4eea49e42a9928932858a5390dbd15fd58b21e19ae0584b34203834511d73c6d511ec61034c2becabc0d624241b40c37809"
+  },
+  "sharedSecretHex": "c6dea8dd115ef27b7e0953539b2b19e59b7abf3ffd57985ec76de86ec31d1b42",
+  "hkdfInfo": "telemetry/m1b/session|tlm:device:03396219237f75a64f12aeb7f39723ab|b0b1b2b3b4b5b6b7b8b9babbbcbdbebf|605a725d2a4adfeeb1a29e17edd621c1b7593ee8cdbc44ac6c4ab6e2f805d23c|tlm:device:56475aa75463474c0285df5dbf2bcab7|a0a1a2a3a4a5a6a7a8a9aaabacadaeaf|493e82fc74464a59268817623d2053c5eb8e2cc4a988b4fee179ec6b010d531d",
+  "sessionKeyHex": "55d8ea80763832c890c0e1695c09bb554ab13ca96b6aacc8976e2cbebea04faf",
+  "safetyCode": "822 483",
+  "message": {
+    "messageId": "11111111-2222-3333-4444-555555555555",
+    "createdAt": 1770000001234,
+    "nonceHex": "c0c1c2c3c4c5c6c7c8c9cacb",
+    "plaintext": "Hello Telemetry",
+    "ciphertextAndTagHex": "3096040f019c9495a9e613d2101e86c6becc824ade9aea364c5a4dddf660fc"
+  },
+  "receipt": {
+    "receivedAt": 1770000002345,
+    "status": "DELIVERED",
+    "signatureHex": "7541704782943ff245f5712a7bb7d9fb330d1e2875fe46592299c9cf654861f845145144f4578a98d635310f02a9f5ded739a9c8cc134feb5e5c446c25662807"
+  }
+}
