@@ -2,7 +2,7 @@
   "expo": {
     "name": "Telemetry iOS Preview",
     "slug": "telemetry-ios-preview",
-    "version": "0.1.0",
+    "version": "0.1.1",
     "orientation": "portrait",
     "scheme": "telemetry-preview",
     "userInterfaceStyle": "dark",
@@ -10,13 +10,13 @@
     "ios": {
       "supportsTablet": false,
       "bundleIdentifier": "com.telemetry.ios.preview",
-      "buildNumber": "1",
+      "buildNumber": "2",
       "infoPlist": {
         "NSBluetoothAlwaysUsageDescription": "Telemetry uses Bluetooth to discover and securely communicate with nearby Telemetry devices without internet.",
         "UIBackgroundModes": ["bluetooth-central", "bluetooth-peripheral"]
       }
     },
     "plugins": ["expo-dev-client"],
-    "runtimeVersion": "0.1.0"
+    "runtimeVersion": "0.1.1"
   }
 }
