@@ -178,15 +178,18 @@ private final class TelemetryCryptoEngine {
     let remoteEphemeral = try Curve25519.KeyAgreement.PublicKey(rawRepresentation: remoteHello.ephemeralPublicKey)
     let secret = try localSession.ephemeralPrivate.sharedSecretFromKeyAgreement(with: remoteEphemeral)
     let ordered = [localSession.localHello, remoteHello].sorted { $0.deviceId < $1.deviceId }
-    var parts = [sessionContext]
+
+    // Android M1B uses literal pipe separators for HKDF sharedInfo.
+    // This must stay byte-for-byte identical across platforms.
+    var transcript = sessionContext
     for hello in ordered {
-      parts += [hello.deviceId, hex(hello.nonce), hex(hello.ephemeralPublicKey)]
+      transcript += "|\(hello.deviceId)|\(hex(hello.nonce))|\(hex(hello.ephemeralPublicKey))"
     }
-    let info = canonical(parts)
+
     return secret.hkdfDerivedSymmetricKey(
       using: SHA256.self,
       salt: Data(),
-      sharedInfo: info,
+      sharedInfo: Data(transcript.utf8),
       outputByteCount: 32
     )
   }
@@ -206,12 +209,7 @@ private final class TelemetryCryptoEngine {
     return String(format: "%03d %03d", value / 1000, value % 1000)
   }
 
-  static func encryptText(
-    key: SymmetricKey,
-    senderId: String,
-    recipientId: String,
-    text: String
-  ) throws -> EncryptedMessage {
+  static func encryptText(key: SymmetricKey, senderId: String, recipientId: String, text: String) throws -> EncryptedMessage {
     guard let payload = text.data(using: .utf8), !payload.isEmpty, payload.count <= maxTextBytes else {
       throw TelemetryNativeError.message("M1B text must be 1-\(maxTextBytes) UTF-8 bytes")
     }
@@ -238,8 +236,8 @@ private final class TelemetryCryptoEngine {
       throw TelemetryNativeError.message("Malformed AES-GCM frame")
     }
     let nonce = try AES.GCM.Nonce(data: message.nonce)
-    let cipher = message.ciphertext.dropLast(16)
-    let tag = message.ciphertext.suffix(16)
+    let cipher = Data(message.ciphertext.dropLast(16))
+    let tag = Data(message.ciphertext.suffix(16))
     let box = try AES.GCM.SealedBox(nonce: nonce, ciphertext: cipher, tag: tag)
     let aad = messageAAD(messageId: message.messageId, senderId: message.senderId, recipientId: message.recipientId, createdAt: message.createdAt)
     let clear = try AES.GCM.open(box, using: key, authenticating: aad)
@@ -316,7 +314,7 @@ private final class TelemetryCryptoEngine {
 
   private static func randomBytes(count: Int) throws -> Data {
     var data = Data(count: count)
-    let status = data.withUnsafeMutableBytes { buffer -> Int32 in
+    let status: OSStatus = data.withUnsafeMutableBytes { buffer in
       guard let base = buffer.baseAddress else { return errSecParam }
       return SecRandomCopyBytes(kSecRandomDefault, count, base)
     }
@@ -354,14 +352,29 @@ private enum FrameCodec {
           let e = value["e"] as? String,
           let n = value["n"] as? String,
           let t = (value["t"] as? NSNumber)?.int64Value,
-          let g = value["g"] as? String else { throw TelemetryNativeError.message("Malformed hello frame") }
-    return SessionHello(deviceId: d, signingPublicKey: try unb64(s), exchangePublicKey: try unb64(x), ephemeralPublicKey: try unb64(e), nonce: try unb64(n), issuedAt: t, signature: try unb64(g))
+          let g = value["g"] as? String else {
+      throw TelemetryNativeError.message("Malformed hello frame")
+    }
+    return SessionHello(
+      deviceId: d,
+      signingPublicKey: try unb64(s),
+      exchangePublicKey: try unb64(x),
+      ephemeralPublicKey: try unb64(e),
+      nonce: try unb64(n),
+      issuedAt: t,
+      signature: try unb64(g)
+    )
   }
 
   static func encodeMessage(_ message: EncryptedMessage) throws -> Data {
     try json([
-      "v": "m1b", "i": message.messageId, "s": message.senderId, "r": message.recipientId,
-      "t": message.createdAt, "n": b64(message.nonce), "c": b64(message.ciphertext)
+      "v": "m1b",
+      "i": message.messageId,
+      "s": message.senderId,
+      "r": message.recipientId,
+      "t": message.createdAt,
+      "n": b64(message.nonce),
+      "c": b64(message.ciphertext)
     ])
   }
 
@@ -373,14 +386,28 @@ private enum FrameCodec {
           let r = value["r"] as? String,
           let t = (value["t"] as? NSNumber)?.int64Value,
           let n = value["n"] as? String,
-          let c = value["c"] as? String else { throw TelemetryNativeError.message("Malformed message frame") }
-    return EncryptedMessage(messageId: i, senderId: s, recipientId: r, createdAt: t, nonce: try unb64(n), ciphertext: try unb64(c))
+          let c = value["c"] as? String else {
+      throw TelemetryNativeError.message("Malformed message frame")
+    }
+    return EncryptedMessage(
+      messageId: i,
+      senderId: s,
+      recipientId: r,
+      createdAt: t,
+      nonce: try unb64(n),
+      ciphertext: try unb64(c)
+    )
   }
 
   static func encodeReceipt(_ receipt: DeliveryReceipt) throws -> Data {
     try json([
-      "v": "m1b", "i": receipt.messageId, "s": receipt.senderId, "r": receipt.recipientId,
-      "t": receipt.receivedAt, "q": receipt.status, "g": b64(receipt.signature)
+      "v": "m1b",
+      "i": receipt.messageId,
+      "s": receipt.senderId,
+      "r": receipt.recipientId,
+      "t": receipt.receivedAt,
+      "q": receipt.status,
+      "g": b64(receipt.signature)
     ])
   }
 
@@ -392,8 +419,17 @@ private enum FrameCodec {
           let r = value["r"] as? String,
           let t = (value["t"] as? NSNumber)?.int64Value,
           let q = value["q"] as? String,
-          let g = value["g"] as? String else { throw TelemetryNativeError.message("Malformed receipt frame") }
-    return DeliveryReceipt(messageId: i, senderId: s, recipientId: r, receivedAt: t, status: q, signature: try unb64(g))
+          let g = value["g"] as? String else {
+      throw TelemetryNativeError.message("Malformed receipt frame")
+    }
+    return DeliveryReceipt(
+      messageId: i,
+      senderId: s,
+      recipientId: r,
+      receivedAt: t,
+      status: q,
+      signature: try unb64(g)
+    )
   }
 
   private static func json(_ value: [String: Any]) throws -> Data {
@@ -408,13 +444,18 @@ private enum FrameCodec {
   }
 
   private static func b64(_ data: Data) -> String {
-    data.base64EncodedString().replacingOccurrences(of: "+", with: "-").replacingOccurrences(of: "/", with: "_").replacingOccurrences(of: "=", with: "")
+    data.base64EncodedString()
+      .replacingOccurrences(of: "+", with: "-")
+      .replacingOccurrences(of: "/", with: "_")
+      .replacingOccurrences(of: "=", with: "")
   }
 
   private static func unb64(_ text: String) throws -> Data {
     var value = text.replacingOccurrences(of: "-", with: "+").replacingOccurrences(of: "_", with: "/")
     while value.count % 4 != 0 { value.append("=") }
-    guard let data = Data(base64Encoded: value) else { throw TelemetryNativeError.message("Invalid base64url") }
+    guard let data = Data(base64Encoded: value) else {
+      throw TelemetryNativeError.message("Invalid base64url")
+    }
     return data
   }
 
@@ -426,7 +467,11 @@ private final class TrustStore {
   private let prefix = "telemetry.trust.v1."
 
   func verify(_ hello: SessionHello) {
-    let value = [FrameCodec.b64Public(hello.signingPublicKey), FrameCodec.b64Public(hello.exchangePublicKey), String(TelemetryCryptoEngine.nowMs())].joined(separator: "|")
+    let value = [
+      FrameCodec.b64Public(hello.signingPublicKey),
+      FrameCodec.b64Public(hello.exchangePublicKey),
+      String(TelemetryCryptoEngine.nowMs())
+    ].joined(separator: "|")
     defaults.set(value, forKey: prefix + hello.deviceId)
   }
 
@@ -434,7 +479,8 @@ private final class TrustStore {
     guard let raw = defaults.string(forKey: prefix + hello.deviceId) else { return false }
     let parts = raw.split(separator: "|", omittingEmptySubsequences: false).map(String.init)
     guard parts.count == 3 else { return false }
-    return parts[0] == FrameCodec.b64Public(hello.signingPublicKey) && parts[1] == FrameCodec.b64Public(hello.exchangePublicKey)
+    return parts[0] == FrameCodec.b64Public(hello.signingPublicKey)
+      && parts[1] == FrameCodec.b64Public(hello.exchangePublicKey)
   }
 }
 
@@ -448,13 +494,16 @@ private final class ReplayWindow {
     seen = seen.filter { now - $0.value <= ttlMs }
     guard seen[messageId] == nil else { return false }
     seen[messageId] = now
-    if seen.count > maxEntries, let oldest = seen.min(by: { $0.value < $1.value })?.key { seen.removeValue(forKey: oldest) }
+    if seen.count > maxEntries,
+       let oldest = seen.min(by: { $0.value < $1.value })?.key {
+      seen.removeValue(forKey: oldest)
+    }
     return true
   }
 }
 
 private final class TelemetryIosCore: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate, CBPeripheralManagerDelegate {
-  var emitter: ((String, [String: Any?]) -> Void)?
+  var emitter: ((String, [String: Any]) -> Void)?
 
   private let crypto: TelemetryCryptoEngine
   private let trust = TrustStore()
@@ -497,8 +546,12 @@ private final class TelemetryIosCore: NSObject, CBCentralManagerDelegate, CBPeri
   func start() {
     desiredRunning = true
     emit("onState", ["state": "starting", "detail": "CoreBluetooth"])
-    if centralManager == nil { centralManager = CBCentralManager(delegate: self, queue: .main) }
-    if peripheralManager == nil { peripheralManager = CBPeripheralManager(delegate: self, queue: .main) }
+    if centralManager == nil {
+      centralManager = CBCentralManager(delegate: self, queue: .main)
+    }
+    if peripheralManager == nil {
+      peripheralManager = CBPeripheralManager(delegate: self, queue: .main)
+    }
     startCentralIfReady()
     startPeripheralIfReady()
   }
@@ -520,14 +573,17 @@ private final class TelemetryIosCore: NSObject, CBCentralManagerDelegate, CBPeri
 
   func connect(peerId: String) throws {
     guard desiredRunning else { throw TelemetryNativeError.message("Start Offline first") }
-    guard let peripheral = discovered[peerId] else { throw TelemetryNativeError.message("Nearby peer is no longer available") }
+    guard let peripheral = discovered[peerId] else {
+      throw TelemetryNativeError.message("Nearby peer is no longer available")
+    }
     _ = try ensureSession(peerId)
     emit("onState", ["state": "connecting", "detail": peerId])
     centralManager?.connect(peripheral, options: nil)
   }
 
   func trustPeer(deviceId: String) -> Bool {
-    guard let pair = sessions.first(where: { $0.value.remoteHello?.deviceId == deviceId }), let remote = pair.value.remoteHello else { return false }
+    guard let pair = sessions.first(where: { $0.value.remoteHello?.deviceId == deviceId }),
+          let remote = pair.value.remoteHello else { return false }
     trust.verify(remote)
     emit("onTrusted", ["peerId": pair.key, "deviceId": deviceId])
     return true
@@ -537,12 +593,24 @@ private final class TelemetryIosCore: NSObject, CBCentralManagerDelegate, CBPeri
     guard let peripheral = discovered[peerId], peripheral.state == .connected else {
       throw TelemetryNativeError.message("Peer BLE connection is not active")
     }
-    guard let session = sessions[peerId], let remote = session.remoteHello, let key = session.sessionKey else {
+    guard let session = sessions[peerId],
+          let remote = session.remoteHello,
+          let key = session.sessionKey else {
       throw TelemetryNativeError.message("Secure peer session is incomplete")
     }
-    guard trust.isVerified(remote) else { throw TelemetryNativeError.message("Compare and trust the safety code first") }
-    guard let characteristic = characteristics[peerId]?[messageUUID] else { throw TelemetryNativeError.message("Telemetry message characteristic is unavailable") }
-    let message = try TelemetryCryptoEngine.encryptText(key: key, senderId: crypto.deviceId, recipientId: remote.deviceId, text: text)
+    guard trust.isVerified(remote) else {
+      throw TelemetryNativeError.message("Compare and trust the safety code first")
+    }
+    guard let characteristic = characteristics[peerId]?[messageUUID] else {
+      throw TelemetryNativeError.message("Telemetry message characteristic is unavailable")
+    }
+
+    let message = try TelemetryCryptoEngine.encryptText(
+      key: key,
+      senderId: crypto.deviceId,
+      recipientId: remote.deviceId,
+      text: text
+    )
     let frame = try FrameCodec.encodeMessage(message)
     guard frame.count <= peripheral.maximumWriteValueLength(for: .withResponse) else {
       throw TelemetryNativeError.message("Encrypted frame exceeds current BLE write size")
@@ -554,22 +622,46 @@ private final class TelemetryIosCore: NSObject, CBCentralManagerDelegate, CBPeri
 
   private func startCentralIfReady() {
     guard desiredRunning, centralManager?.state == .poweredOn else { return }
-    centralManager?.scanForPeripherals(withServices: [serviceUUID], options: [CBCentralManagerScanOptionAllowDuplicatesKey: false])
+    centralManager?.scanForPeripherals(
+      withServices: [serviceUUID],
+      options: [CBCentralManagerScanOptionAllowDuplicatesKey: false]
+    )
     emit("onState", ["state": "scanning", "detail": "advertising + scanning"])
   }
 
   private func startPeripheralIfReady() {
-    guard desiredRunning, let manager = peripheralManager, manager.state == .poweredOn else { return }
+    guard desiredRunning,
+          let manager = peripheralManager,
+          manager.state == .poweredOn else { return }
+
     if !gattInstalled {
-      let hello = CBMutableCharacteristic(type: helloUUID, properties: [.read, .write], value: nil, permissions: [.readable, .writeable])
-      let message = CBMutableCharacteristic(type: messageUUID, properties: [.write], value: nil, permissions: [.writeable])
-      let receipt = CBMutableCharacteristic(type: receiptUUID, properties: [.read], value: nil, permissions: [.readable])
+      let hello = CBMutableCharacteristic(
+        type: helloUUID,
+        properties: [.read, .write],
+        value: nil,
+        permissions: [.readable, .writeable]
+      )
+      let message = CBMutableCharacteristic(
+        type: messageUUID,
+        properties: [.write],
+        value: nil,
+        permissions: [.writeable]
+      )
+      let receipt = CBMutableCharacteristic(
+        type: receiptUUID,
+        properties: [.read],
+        value: nil,
+        permissions: [.readable]
+      )
       let service = CBMutableService(type: serviceUUID, primary: true)
       service.characteristics = [hello, message, receipt]
       manager.add(service)
       gattInstalled = true
     } else if !manager.isAdvertising {
-      manager.startAdvertising([CBAdvertisementDataServiceUUIDsKey: [serviceUUID], CBAdvertisementDataLocalNameKey: "Telemetry"])
+      manager.startAdvertising([
+        CBAdvertisementDataServiceUUIDsKey: [serviceUUID],
+        CBAdvertisementDataLocalNameKey: "Telemetry"
+      ])
     }
   }
 
@@ -584,44 +676,85 @@ private final class TelemetryIosCore: NSObject, CBCentralManagerDelegate, CBPeri
 
   private func acceptHello(peerId: String, frame: Data) throws {
     let remote = try FrameCodec.decodeHello(frame)
-    guard TelemetryCryptoEngine.verifyHello(remote) else { throw TelemetryNativeError.message("Invalid signed peer hello") }
-    guard remote.deviceId != crypto.deviceId else { throw TelemetryNativeError.message("Self connection rejected") }
+    guard TelemetryCryptoEngine.verifyHello(remote) else {
+      throw TelemetryNativeError.message("Invalid signed peer hello")
+    }
+    guard remote.deviceId != crypto.deviceId else {
+      throw TelemetryNativeError.message("Self connection rejected")
+    }
+
     let session = try ensureSession(peerId)
     session.remoteHello = remote
-    session.sessionKey = try TelemetryCryptoEngine.deriveSessionKey(localSession: session, remoteHello: remote)
+    session.sessionKey = try TelemetryCryptoEngine.deriveSessionKey(
+      localSession: session,
+      remoteHello: remote
+    )
+
     let code = TelemetryCryptoEngine.safetyCode(session.localHello, remote)
     if trust.isVerified(remote) {
       emit("onTrusted", ["peerId": peerId, "deviceId": remote.deviceId])
     } else {
-      emit("onVerification", ["peerId": peerId, "deviceId": remote.deviceId, "safetyCode": code])
+      emit("onVerification", [
+        "peerId": peerId,
+        "deviceId": remote.deviceId,
+        "safetyCode": code
+      ])
     }
   }
 
   private func acceptMessage(peerId: String, frame: Data) throws {
-    guard let session = sessions[peerId], let remote = session.remoteHello, let key = session.sessionKey else {
+    guard let session = sessions[peerId],
+          let remote = session.remoteHello,
+          let key = session.sessionKey else {
       throw TelemetryNativeError.message("Unknown secure peer session")
     }
-    guard trust.isVerified(remote) else { throw TelemetryNativeError.message("Peer is not trusted") }
+    guard trust.isVerified(remote) else {
+      throw TelemetryNativeError.message("Peer is not trusted")
+    }
+
     let message = try FrameCodec.decodeMessage(frame)
-    guard message.senderId == remote.deviceId else { throw TelemetryNativeError.message("Sender identity mismatch") }
-    guard message.recipientId == crypto.deviceId else { throw TelemetryNativeError.message("Wrong message recipient") }
-    guard replay.accept(message.messageId) else { throw TelemetryNativeError.message("Duplicate message rejected") }
+    guard message.senderId == remote.deviceId else {
+      throw TelemetryNativeError.message("Sender identity mismatch")
+    }
+    guard message.recipientId == crypto.deviceId else {
+      throw TelemetryNativeError.message("Wrong message recipient")
+    }
+    guard replay.accept(message.messageId) else {
+      throw TelemetryNativeError.message("Duplicate message rejected")
+    }
+
     let clear = try TelemetryCryptoEngine.decryptText(key: key, message: message)
     receipts[peerId] = try FrameCodec.encodeReceipt(crypto.createReceipt(for: message))
-    emit("onMessage", ["peerId": peerId, "deviceId": remote.deviceId, "messageId": message.messageId, "text": clear])
+    emit("onMessage", [
+      "peerId": peerId,
+      "deviceId": remote.deviceId,
+      "messageId": message.messageId,
+      "text": clear
+    ])
   }
 
   private func acceptReceipt(peerId: String, frame: Data) throws {
-    guard !frame.isEmpty else { throw TelemetryNativeError.message("Empty delivery receipt") }
-    guard let session = sessions[peerId], let remote = session.remoteHello else { throw TelemetryNativeError.message("Unknown peer session") }
+    guard !frame.isEmpty else {
+      throw TelemetryNativeError.message("Empty delivery receipt")
+    }
+    guard let session = sessions[peerId],
+          let remote = session.remoteHello else {
+      throw TelemetryNativeError.message("Unknown peer session")
+    }
+
     let receipt = try FrameCodec.decodeReceipt(frame)
-    guard receipt.messageId == session.lastOutboundMessageId else { throw TelemetryNativeError.message("Receipt does not match outbound message") }
-    guard TelemetryCryptoEngine.verifyReceipt(receipt, peerSigningKey: remote.signingPublicKey) else { throw TelemetryNativeError.message("Invalid signed delivery receipt") }
+    guard receipt.messageId == session.lastOutboundMessageId else {
+      throw TelemetryNativeError.message("Receipt does not match outbound message")
+    }
+    guard TelemetryCryptoEngine.verifyReceipt(receipt, peerSigningKey: remote.signingPublicKey) else {
+      throw TelemetryNativeError.message("Invalid signed delivery receipt")
+    }
+
     session.lastOutboundMessageId = nil
     emit("onDelivery", ["peerId": peerId, "messageId": receipt.messageId])
   }
 
-  private func emit(_ name: String, _ payload: [String: Any?]) {
+  private func emit(_ name: String, _ payload: [String: Any]) {
     emitter?(name, payload)
   }
 
@@ -631,18 +764,31 @@ private final class TelemetryIosCore: NSObject, CBCentralManagerDelegate, CBPeri
 
   func centralManagerDidUpdateState(_ central: CBCentralManager) {
     switch central.state {
-    case .poweredOn: startCentralIfReady()
-    case .poweredOff: emit("onState", ["state": "bluetooth-off", "detail": "Turn Bluetooth on"])
-    case .unauthorized: emit("onError", ["message": "Bluetooth permission is required"])
-    default: break
+    case .poweredOn:
+      startCentralIfReady()
+    case .poweredOff:
+      emit("onState", ["state": "bluetooth-off", "detail": "Turn Bluetooth on"])
+    case .unauthorized:
+      emit("onError", ["message": "Bluetooth permission is required"])
+    default:
+      break
     }
   }
 
-  func centralManager(_ central: CBCentralManager, didDiscover peripheral: CBPeripheral, advertisementData: [String : Any], rssi RSSI: NSNumber) {
+  func centralManager(
+    _ central: CBCentralManager,
+    didDiscover peripheral: CBPeripheral,
+    advertisementData: [String: Any],
+    rssi RSSI: NSNumber
+  ) {
     let peerId = peripheral.identifier.uuidString
     discovered[peerId] = peripheral
     let advertisedName = advertisementData[CBAdvertisementDataLocalNameKey] as? String
-    emit("onPeerSeen", ["peerId": peerId, "name": advertisedName ?? peripheral.name, "rssi": RSSI.intValue])
+    emit("onPeerSeen", [
+      "peerId": peerId,
+      "name": advertisedName ?? peripheral.name ?? "Telemetry device",
+      "rssi": RSSI.intValue
+    ])
   }
 
   func centralManager(_ central: CBCentralManager, didConnect peripheral: CBPeripheral) {
@@ -664,22 +810,33 @@ private final class TelemetryIosCore: NSObject, CBCentralManagerDelegate, CBPeri
   }
 
   func peripheral(_ peripheral: CBPeripheral, didDiscoverServices error: Error?) {
-    if let error { emitError(error); return }
+    if let error {
+      emitError(error)
+      return
+    }
     for service in peripheral.services ?? [] where service.uuid == serviceUUID {
       peripheral.discoverCharacteristics([helloUUID, messageUUID, receiptUUID], for: service)
     }
   }
 
   func peripheral(_ peripheral: CBPeripheral, didDiscoverCharacteristicsFor service: CBService, error: Error?) {
-    if let error { emitError(error); return }
+    if let error {
+      emitError(error)
+      return
+    }
+
     let peerId = peripheral.identifier.uuidString
     var map: [CBUUID: CBCharacteristic] = [:]
-    for item in service.characteristics ?? [] { map[item.uuid] = item }
+    for item in service.characteristics ?? [] {
+      map[item.uuid] = item
+    }
     characteristics[peerId] = map
+
     guard let helloCharacteristic = map[helloUUID] else {
       emit("onError", ["message": "Nearby device is not a Telemetry M1B peer"])
       return
     }
+
     do {
       let session = try ensureSession(peerId)
       let frame = try FrameCodec.encodeHello(session.localHello)
@@ -687,11 +844,16 @@ private final class TelemetryIosCore: NSObject, CBCentralManagerDelegate, CBPeri
         throw TelemetryNativeError.message("Signed hello exceeds current BLE write size")
       }
       peripheral.writeValue(frame, for: helloCharacteristic, type: .withResponse)
-    } catch { emitError(error) }
+    } catch {
+      emitError(error)
+    }
   }
 
   func peripheral(_ peripheral: CBPeripheral, didWriteValueFor characteristic: CBCharacteristic, error: Error?) {
-    if let error { emitError(error); return }
+    if let error {
+      emitError(error)
+      return
+    }
     let map = characteristics[peripheral.identifier.uuidString]
     if characteristic.uuid == helloUUID, let hello = map?[helloUUID] {
       peripheral.readValue(for: hello)
@@ -701,7 +863,10 @@ private final class TelemetryIosCore: NSObject, CBCentralManagerDelegate, CBPeri
   }
 
   func peripheral(_ peripheral: CBPeripheral, didUpdateValueFor characteristic: CBCharacteristic, error: Error?) {
-    if let error { emitError(error); return }
+    if let error {
+      emitError(error)
+      return
+    }
     guard let data = characteristic.value else { return }
     do {
       if characteristic.uuid == helloUUID {
@@ -709,26 +874,41 @@ private final class TelemetryIosCore: NSObject, CBCentralManagerDelegate, CBPeri
       } else if characteristic.uuid == receiptUUID {
         try acceptReceipt(peerId: peripheral.identifier.uuidString, frame: data)
       }
-    } catch { emitError(error) }
+    } catch {
+      emitError(error)
+    }
   }
 
   func peripheralManagerDidUpdateState(_ peripheral: CBPeripheralManager) {
     switch peripheral.state {
-    case .poweredOn: startPeripheralIfReady()
-    case .poweredOff: emit("onState", ["state": "bluetooth-off", "detail": "Turn Bluetooth on"])
-    case .unauthorized: emit("onError", ["message": "Bluetooth permission is required"])
-    default: break
+    case .poweredOn:
+      startPeripheralIfReady()
+    case .poweredOff:
+      emit("onState", ["state": "bluetooth-off", "detail": "Turn Bluetooth on"])
+    case .unauthorized:
+      emit("onError", ["message": "Bluetooth permission is required"])
+    default:
+      break
     }
   }
 
   func peripheralManager(_ peripheral: CBPeripheralManager, didAdd service: CBService, error: Error?) {
-    if let error { emitError(error); return }
+    if let error {
+      emitError(error)
+      return
+    }
     guard desiredRunning, !peripheral.isAdvertising else { return }
-    peripheral.startAdvertising([CBAdvertisementDataServiceUUIDsKey: [serviceUUID], CBAdvertisementDataLocalNameKey: "Telemetry"])
+    peripheral.startAdvertising([
+      CBAdvertisementDataServiceUUIDsKey: [serviceUUID],
+      CBAdvertisementDataLocalNameKey: "Telemetry"
+    ])
   }
 
   func peripheralManagerDidStartAdvertising(_ peripheral: CBPeripheralManager, error: Error?) {
-    if let error { emitError(error); return }
+    if let error {
+      emitError(error)
+      return
+    }
     emit("onState", ["state": "offline", "detail": "advertising + scanning"])
   }
 
@@ -744,6 +924,7 @@ private final class TelemetryIosCore: NSObject, CBCentralManagerDelegate, CBPeri
         peripheral.respond(to: request, withResult: .requestNotSupported)
         return
       }
+
       guard request.offset <= value.count else {
         peripheral.respond(to: request, withResult: .invalidOffset)
         return
@@ -759,9 +940,12 @@ private final class TelemetryIosCore: NSObject, CBCentralManagerDelegate, CBPeri
   func peripheralManager(_ peripheral: CBPeripheralManager, didReceiveWrite requests: [CBATTRequest]) {
     guard let first = requests.first else { return }
     var result: CBATTError.Code = .success
+
     do {
       for request in requests {
-        guard request.offset == 0, let value = request.value else { throw TelemetryNativeError.message("Unsupported prepared/offset BLE write") }
+        guard request.offset == 0, let value = request.value else {
+          throw TelemetryNativeError.message("Unsupported prepared/offset BLE write")
+        }
         let peerId = request.central.identifier.uuidString
         if request.characteristic.uuid == helloUUID {
           try acceptHello(peerId: peerId, frame: value)
@@ -775,6 +959,7 @@ private final class TelemetryIosCore: NSObject, CBCentralManagerDelegate, CBPeri
       result = .unlikelyError
       emitError(error)
     }
+
     peripheral.respond(to: first, withResult: result)
   }
 }
@@ -785,7 +970,15 @@ public class TelemetryIosNativeModule: Module {
   public func definition() -> ModuleDefinition {
     Name("TelemetryIosNative")
 
-    Events("onState", "onPeerSeen", "onVerification", "onTrusted", "onMessage", "onDelivery", "onError")
+    Events(
+      "onState",
+      "onPeerSeen",
+      "onVerification",
+      "onTrusted",
+      "onMessage",
+      "onDelivery",
+      "onError"
+    )
 
     OnCreate {
       self.core.emitter = { [weak self] name, payload in
