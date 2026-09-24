@@ -24,7 +24,10 @@ jobs:
           node-version: "22.13.1"
       - name: Install iOS preview JS dependencies
         working-directory: mobile/ios-preview
-        run: npm install
+        run: npm install --ignore-scripts
+      - name: Apply Expo Swift compatibility patch
+        working-directory: mobile/ios-preview
+        run: node scripts/patch-expo-modules-jsi.mjs
       - name: Typecheck iOS preview shell
         working-directory: mobile/ios-preview
         run: npm run typecheck
@@ -47,7 +50,10 @@ jobs:
           xcrun swift --version
       - name: Install JS dependencies
         working-directory: mobile/ios-preview
-        run: npm install
+        run: npm install --ignore-scripts
+      - name: Apply Expo Swift compatibility patch
+        working-directory: mobile/ios-preview
+        run: node scripts/patch-expo-modules-jsi.mjs
       - name: Generate native iOS project
         working-directory: mobile/ios-preview
         run: npx expo prebuild --clean --platform ios
