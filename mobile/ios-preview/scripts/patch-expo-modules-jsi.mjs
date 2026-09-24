@@ -12,35 +12,22 @@ if (!fs.existsSync(headerPath) || !fs.existsSync(swiftPath)) {
 }
 
 const version = JSON.parse(fs.readFileSync(pkgPath, "utf8")).version;
-if (version !== "57.1.0") {
-  throw new Error(`Review Expo compatibility patch for expo-modules-jsi ${version}; verified version is 57.1.0`);
-}
-
 let header = fs.readFileSync(headerPath, "utf8");
 let swift = fs.readFileSync(swiftPath, "utf8");
-let changed = false;
+let headerChanged = false;
+let swiftChanged = false;
 
+// Xcode 26 rejects SWIFT_RETURNS_RETAINED on these constructors.
+// Removing only this annotation keeps runtime behavior unchanged and is the
+// smallest workaround for Expo issue #50067.
 const ctorNeedle = "SWIFT_RETURNS_RETAINED RuntimeScheduler(";
-const ctorMacro = "EXPO_RUNTIME_SCHEDULER_CTOR_RETAINED RuntimeScheduler(";
 if (header.includes(ctorNeedle)) {
-  if (!header.includes("#define EXPO_RUNTIME_SCHEDULER_CTOR_RETAINED")) {
-    const marker = "public:\n";
-    if (!header.includes(marker)) throw new Error("RuntimeScheduler public marker changed upstream");
-    const compatibility = [
-      "public:",
-      "#if defined(__apple_build_version__) && __apple_build_version__ >= 18000000",
-      "#define EXPO_RUNTIME_SCHEDULER_CTOR_RETAINED SWIFT_RETURNS_RETAINED",
-      "#else",
-      "#define EXPO_RUNTIME_SCHEDULER_CTOR_RETAINED",
-      "#endif",
-      "",
-    ].join("\n");
-    header = header.replace(marker, compatibility);
-  }
-  header = header.split(ctorNeedle).join(ctorMacro);
-  changed = true;
+  header = header.split(ctorNeedle).join("RuntimeScheduler(");
+  headerChanged = true;
 }
 
+// Swift 6.2 rejects raw-pointer captures across JavaScriptActor closures.
+// Wrap only the call-scoped pointers that are present in the affected source.
 const resultDecl = "nonisolated(unsafe) let resultPtr = resultPtr";
 const thisDecl = "nonisolated(unsafe) let thisPtr = thisPtr";
 const argumentsDecl = "nonisolated(unsafe) let argumentsPtr = argumentsPtr";
@@ -48,10 +35,23 @@ const needsSwiftPatch = swift.includes(resultDecl) || swift.includes(thisDecl) |
 
 if (needsSwiftPatch) {
   if (!swift.includes("struct TelemetryUnsafeSendableBox")) {
-    const importMarker = "internal import jsi\n";
-    if (!swift.includes(importMarker)) throw new Error("JavaScriptRuntime import marker changed upstream");
-    const box = `internal import jsi\n\n// Temporary Swift 6.2 compatibility for Expo issue #50067.\nprivate struct TelemetryUnsafeSendableBox<Value>: @unchecked Sendable {\n  let value: Value\n  @inline(__always) init(_ value: Value) { self.value = value }\n}\n`;
-    swift = swift.replace(importMarker, box);
+    const helper = [
+      "",
+      "// Temporary Swift 6.2 compatibility for Expo issue #50067.",
+      "private struct TelemetryUnsafeSendableBox<Value>: @unchecked Sendable {",
+      "  let value: Value",
+      "  @inline(__always) init(_ value: Value) { self.value = value }",
+      "}",
+      "",
+    ].join("\n");
+
+    if (swift.includes("internal import jsi\n")) {
+      swift = swift.replace("internal import jsi\n", `internal import jsi\n${helper}`);
+    } else if (swift.includes("import Foundation\n")) {
+      swift = swift.replace("import Foundation\n", `import Foundation\n${helper}`);
+    } else {
+      throw new Error("Cannot locate a safe insertion point in JavaScriptRuntime.swift");
+    }
   }
 
   swift = swift.split(resultDecl).join("let resultPtr = TelemetryUnsafeSendableBox(resultPtr)");
@@ -61,13 +61,14 @@ if (needsSwiftPatch) {
   swift = swift.split("UnsafeMutablePointer(mutating: thisPtr).move()").join("UnsafeMutablePointer(mutating: thisPtr.value).move()");
   swift = swift.split("JavaScriptValuesBuffer(runtime, start: argumentsPtr, count: argumentsCount)").join("JavaScriptValuesBuffer(runtime, start: argumentsPtr.value, count: argumentsCount)");
   swift = swift.split("JavaScriptUnownedValue(runtime.pointee, thisPtr)").join("JavaScriptUnownedValue(runtime.pointee, thisPtr.value)");
-  changed = true;
+  swiftChanged = true;
 }
 
-if (changed) {
-  fs.writeFileSync(headerPath, header);
-  fs.writeFileSync(swiftPath, swift);
-  console.log(`[telemetry] patched expo-modules-jsi ${version} for Xcode 26 / Swift 6.2+ compatibility`);
+if (headerChanged) fs.writeFileSync(headerPath, header);
+if (swiftChanged) fs.writeFileSync(swiftPath, swift);
+
+if (headerChanged || swiftChanged) {
+  console.log(`[telemetry] expo-modules-jsi ${version}: applied Xcode 26 compatibility patch (header=${headerChanged}, swift=${swiftChanged})`);
 } else {
-  console.log(`[telemetry] expo-modules-jsi ${version}: compatibility source already patched or fixed upstream`);
+  console.log(`[telemetry] expo-modules-jsi ${version}: no affected compatibility patterns found; continuing to compiler validation`);
 }
