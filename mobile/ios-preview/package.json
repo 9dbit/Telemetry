@@ -1,6 +1,7 @@
 {
   "name": "telemetry-ios-preview",
   "version": "0.1.0",
+  "description": "Telemetry native iOS preview shell",
   "private": true,
   "main": "index.ts",
   "scripts": {
