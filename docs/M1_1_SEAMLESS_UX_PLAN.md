@@ -1,6 +1,6 @@
 # Telemetry M1.1 Seamless UX Plan
 
-Status: approved for implementation after M1 iPhone↔iPhone direct BLE hardware validation.
+Status: implementation in draft PR #12 after M1 iPhone↔iPhone direct BLE hardware validation.
 
 ## Product principle
 
@@ -131,6 +131,7 @@ Satellite is a route option, not a chat mode visible to users.
 - keyboard-safe composer
 - bottom nav icon+label redesign
 - improved delivery state UI
+- bidirectional BLE transport retained from hardware-validated M1 patch
 
 ### M1.2 Reliability
 - retry/backoff
@@ -180,3 +181,13 @@ Satellite is a route option, not a chat mode visible to users.
 - Bottom nav has flat icons and readable labels.
 - UI never claims active BLE session after native disconnect.
 - Both iPhone directions can send and receive with signed Delivered receipts.
+
+## Current validation state
+
+- iOS dependency install: PASS.
+- Expo Swift 6.2 compatibility patch: PASS.
+- TypeScript typecheck: PASS.
+- Expo Doctor: PASS.
+- Bidirectional BLE source patch application: PASS.
+- Final iOS simulator native compile: in progress.
+- Signed physical-device build and M1.1 auto-connect retest: pending.
