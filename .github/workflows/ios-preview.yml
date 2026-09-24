@@ -28,6 +28,9 @@ jobs:
       - name: Apply Expo Swift compatibility patch
         working-directory: mobile/ios-preview
         run: node scripts/patch-expo-modules-jsi.mjs
+      - name: Apply Telemetry bidirectional BLE patch
+        working-directory: mobile/ios-preview
+        run: node scripts/patch-telemetry-ios-bidirectional.mjs
       - name: Typecheck iOS preview shell
         working-directory: mobile/ios-preview
         run: npm run typecheck
@@ -54,6 +57,9 @@ jobs:
       - name: Apply Expo Swift compatibility patch
         working-directory: mobile/ios-preview
         run: node scripts/patch-expo-modules-jsi.mjs
+      - name: Apply Telemetry bidirectional BLE patch
+        working-directory: mobile/ios-preview
+        run: node scripts/patch-telemetry-ios-bidirectional.mjs
       - name: Generate native iOS project
         working-directory: mobile/ios-preview
         run: npx expo prebuild --clean --platform ios
