@@ -5,7 +5,7 @@
   "private": true,
   "main": "index.ts",
   "scripts": {
-    "postinstall": "node scripts/patch-expo-modules-jsi.mjs",
+    "postinstall": "node scripts/patch-expo-modules-jsi.mjs && node scripts/patch-telemetry-ios-bidirectional.mjs",
     "start": "expo start --dev-client",
     "prebuild": "expo prebuild --clean --platform ios",
     "ios": "expo run:ios --device",
