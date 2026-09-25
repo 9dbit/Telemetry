@@ -9,7 +9,6 @@ on:
       - "mobile/android/**"
       - "mobile/contracts/**"
       - ".github/workflows/android-m1a.yml"
-      - ".github/voice-ui-mainactivity.patch"
   push:
     branches: [main]
     paths:
@@ -25,32 +24,15 @@ jobs:
       TELEMETRY_VERSION_NAME: 0.5.0-preview.${{ github.run_number }}
     steps:
       - uses: actions/checkout@v4
-        with:
-          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.ref || github.ref }}
-          fetch-depth: 2
-
-      - name: Apply M1.6 voice UI candidate
-        if: github.event_name == 'pull_request' && github.event.pull_request.head.ref == 'feature/m1.6-p2p-voice-foundation'
-        shell: bash
-        run: |
-          set -euo pipefail
-          git apply --check .github/voice-ui-mainactivity.patch
-          git apply .github/voice-ui-mainactivity.patch
-          git diff --check
-          test -n "$(git diff -- mobile/android/app/src/main/java/com/telemetry/app/MainActivity.kt)"
-
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: "17"
-
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: "9.6.0"
-
       - name: Build and unit test Android
         run: gradle -p mobile/android :app:testDebugUnitTest :app:assembleDebug --stacktrace
-
       - name: Upload preview debug APK
         uses: actions/upload-artifact@v4
         with:
@@ -58,32 +40,6 @@ jobs:
           path: mobile/android/app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
           retention-days: 14
-
-      - name: Promote validated M1.6 voice UI
-        if: github.event_name == 'pull_request' && github.event.pull_request.head.ref == 'feature/m1.6-p2p-voice-foundation'
-        shell: bash
-        run: |
-          set -euo pipefail
-          test "$(git branch --show-current)" = "feature/m1.6-p2p-voice-foundation"
-          git diff --check
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-
-          git add mobile/android/app/src/main/java/com/telemetry/app/MainActivity.kt
-          git rm .github/voice-ui-mainactivity.patch
-          git show HEAD^:.github/workflows/android-m1a.yml > .github/workflows/android-m1a.yml
-          git add .github/workflows/android-m1a.yml
-
-          ACTUAL="$(git diff --cached --name-only | sort)"
-          EXPECTED="$(printf '%s\n' \
-            .github/voice-ui-mainactivity.patch \
-            .github/workflows/android-m1a.yml \
-            mobile/android/app/src/main/java/com/telemetry/app/MainActivity.kt | sort)"
-          test "$ACTUAL" = "$EXPECTED"
-
-          git commit -m "feat(call): wire P2P voice controls into Android chat"
-          git push origin "HEAD:${GITHUB_HEAD_REF}"
-
       - name: Publish preview update release
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         env:
