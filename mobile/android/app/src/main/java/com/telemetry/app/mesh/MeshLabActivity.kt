@@ -27,6 +27,10 @@ import java.security.SecureRandom
 import java.util.UUID
 
 class MeshLabActivity : ComponentActivity() {
+    companion object {
+        private const val MEDIA_RELAY_TTL_MS = 10 * 60_000L
+    }
+
     private lateinit var identity: DeviceIdentity
     private lateinit var trustStore: AndroidTrustStore
     private lateinit var node: AndroidMeshNodeRuntime
@@ -36,55 +40,54 @@ class MeshLabActivity : ComponentActivity() {
     private lateinit var mediaStore: AndroidOpaqueMediaChunkStore
     private var discovery: TelemetryBleDiscovery? = null
 
-    private lateinit var statusView: TextView
-    private lateinit var peersContainer: LinearLayout
-    private lateinit var routesView: TextView
-    private lateinit var targetInput: EditText
-    private lateinit var trustButton: Button
-    private lateinit var advertiseButton: Button
-    private lateinit var probeButton: Button
-    private lateinit var largeProbeButton: Button
-
     private val peers = LinkedHashMap<String, PeerCandidate>()
     private var pendingDeviceId: String? = null
     private var trustedDeviceId: String? = null
 
+    private lateinit var statusView: TextView
+    private lateinit var peersView: LinearLayout
+    private lateinit var routesView: TextView
+    private lateinit var targetInput: EditText
+    private lateinit var trustButton: Button
+    private lateinit var routeButton: Button
+    private lateinit var smallProbeButton: Button
+    private lateinit var largeProbeButton: Button
+
     private val permissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
     ) { result ->
-        if (result.values.all { it }) startDiscovery()
-        else setStatus("Nearby-device permission denied")
+        if (result.values.all { it }) startDiscovery() else setStatus("Nearby permission denied")
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-
         identity = AndroidIdentityStore(this).getOrCreate()
         trustStore = AndroidTrustStore(this)
         mediaStore = AndroidOpaqueMediaChunkStore(File(filesDir, "telemetry-media-relay"))
+
         wifiPort = AndroidWifiLocalMeshPort(
             context = this,
-            onRelayWire = { wire ->
-                endpoint.ingestRelayWire(wire, System.currentTimeMillis()) != null
-            },
+            onRelayWire = { wire -> endpoint.ingestRelayWire(wire, System.currentTimeMillis()) != null },
             onMediaChunkWire = { wire ->
                 runCatching {
-                    mediaStore.put(
-                        wire = wire,
-                        expiresAtEpochMs = System.currentTimeMillis() + MEDIA_RELAY_TTL_MS
-                    ).accepted
+                    val result = mediaStore.put(wire, System.currentTimeMillis() + MEDIA_RELAY_TTL_MS)
+                    result.accepted || result.reason == "duplicate"
                 }.getOrDefault(false)
             }
         )
         node = AndroidMeshNodeRuntime(
             localDeviceId = identity.deviceId,
-            capabilities = listOf("ble", "mesh-relay", wifiPort.localCapability)
-        ) { event ->
-            runOnUiThread {
-                setStatus("Mesh ${event.type}: ${event.messageId} ${event.reason ?: ""}".trim())
-                renderRoutes()
+            capabilities = listOf("ble", "mesh-relay", wifiPort.localCapability),
+            onLocalDelivery = { frame ->
+                runOnUiThread { setStatus("Local opaque delivery ${frame.header.messageId}") }
+            },
+            onEvent = { event ->
+                runOnUiThread {
+                    setStatus("Mesh ${event.type}: ${event.messageId} ${event.reason ?: ""}".trim())
+                    renderRoutes()
+                }
             }
-        }
+        )
         transport = TelemetryGattTransport(this, identity, trustStore) { event ->
             runOnUiThread { reduceSecure(event) }
         }
@@ -94,7 +97,7 @@ class MeshLabActivity : ComponentActivity() {
         node.registerTransport(WifiLocalMeshTransportAdapter(wifiPort))
         wifiPort.start()
 
-        setContentView(buildContent())
+        setContentView(buildUi())
         ensurePermissionsAndStart()
     }
 
@@ -105,28 +108,24 @@ class MeshLabActivity : ComponentActivity() {
         super.onDestroy()
     }
 
-    private fun buildContent(): ScrollView {
-        fun label(text: String) = TextView(this).apply {
-            this.text = text
-            textSize = 14f
-            setPadding(0, 12, 0, 8)
-        }
-        fun button(text: String, onClick: () -> Unit) = Button(this).apply {
-            this.text = text
-            setOnClickListener { onClick() }
-        }
-
+    private fun buildUi(): ScrollView {
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(32, 32, 32, 48)
         }
-        root.addView(TextView(this).apply {
-            text = "Telemetry Mesh Lab"
-            textSize = 24f
-        })
-        root.addView(label("Device ID\n${identity.deviceId}"))
-        root.addView(label("Local Wi-Fi service\ntlm-${wifiPort.serviceId}\nEphemeral service ID only; device ID is not broadcast over mDNS."))
+        fun label(value: String) = TextView(this).apply {
+            text = value
+            textSize = 14f
+            setPadding(0, 10, 0, 8)
+        }
+        fun button(value: String, action: () -> Unit) = Button(this).apply {
+            text = value
+            setOnClickListener { action() }
+        }
 
+        root.addView(TextView(this).apply { text = "Telemetry Mesh Lab"; textSize = 24f })
+        root.addView(label("Device ID\n${identity.deviceId}"))
+        root.addView(label("Wi-Fi local service\ntlm-${wifiPort.serviceId}\nEphemeral mDNS ID only."))
         statusView = label("Ready")
         root.addView(statusView)
 
@@ -136,60 +135,47 @@ class MeshLabActivity : ComponentActivity() {
         root.addView(scanRow)
 
         root.addView(label("Nearby BLE peers"))
-        peersContainer = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-        root.addView(peersContainer)
+        peersView = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        root.addView(peersView)
 
         trustButton = button("Trust pending peer") { trustPending() }.apply { isEnabled = false }
+        routeButton = button("Send signed route advertisement") { advertiseRoute() }.apply { isEnabled = false }
         root.addView(trustButton)
+        root.addView(routeButton)
 
-        advertiseButton = button("Send signed route advertisement") { advertiseRoute() }.apply { isEnabled = false }
-        root.addView(advertiseButton)
-
-        root.addView(label("Routes"))
-        routesView = label("No routes")
+        routesView = label("No active routes")
+        root.addView(label("Routes / capability state"))
         root.addView(routesView)
-        root.addView(button("Refresh routes + Wi-Fi binding") { renderRoutes() })
+        root.addView(button("Refresh") { renderRoutes() })
 
         targetInput = EditText(this).apply {
-            hint = "Target Telemetry device ID for relay probe"
+            hint = "Target Telemetry device ID"
             isSingleLine = true
         }
         root.addView(targetInput)
-        probeButton = button("Send 64-byte adaptive relay probe") { sendRelayProbe(64) }.apply { isEnabled = false }
-        root.addView(probeButton)
-        largeProbeButton = button("Send 64 KB Wi-Fi relay probe") { sendRelayProbe(64 * 1024) }.apply { isEnabled = false }
+        smallProbeButton = button("Send 64-byte adaptive relay probe") { sendProbe(64) }.apply { isEnabled = false }
+        largeProbeButton = button("Send 64 KB Wi-Fi relay probe") { sendProbe(64 * 1024) }.apply { isEnabled = false }
+        root.addView(smallProbeButton)
         root.addView(largeProbeButton)
-
-        root.addView(label("Lab rules: route advertisements are signed. Relay probes contain random opaque bytes, never plaintext. BLE frames over 480 bytes are rejected instead of fragmented silently. The 64 KB probe therefore requires Wi-Fi-local. Incoming TMC1 media chunks are persisted only as opaque encrypted wire data."))
-
+        root.addView(label("Rules: TMA1 routes are signed. TMR1 relay data stays opaque. BLE rejects wire >480 bytes. Large probes require Wi-Fi-local. Incoming TMC1 media is stored encrypted."))
         return ScrollView(this).apply { addView(root) }
     }
 
     private fun ensurePermissionsAndStart() {
-        val permissions = requiredPermissions()
-        if (permissions.all { checkSelfPermission(it) == PackageManager.PERMISSION_GRANTED }) {
-            startDiscovery()
+        val required = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            arrayOf(Manifest.permission.BLUETOOTH_SCAN, Manifest.permission.BLUETOOTH_ADVERTISE, Manifest.permission.BLUETOOTH_CONNECT)
         } else {
-            permissionLauncher.launch(permissions)
+            arrayOf(Manifest.permission.ACCESS_FINE_LOCATION)
         }
-    }
-
-    private fun requiredPermissions(): Array<String> = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-        arrayOf(
-            Manifest.permission.BLUETOOTH_SCAN,
-            Manifest.permission.BLUETOOTH_ADVERTISE,
-            Manifest.permission.BLUETOOTH_CONNECT
-        )
-    } else {
-        arrayOf(Manifest.permission.ACCESS_FINE_LOCATION)
+        if (required.all { checkSelfPermission(it) == PackageManager.PERMISSION_GRANTED }) startDiscovery()
+        else permissionLauncher.launch(required)
     }
 
     private fun startDiscovery() {
         discovery?.stop()
         transport.start()
-        discovery = TelemetryBleDiscovery(this) { event ->
-            runOnUiThread { reduceDiscovery(event) }
-        }.also { it.start() }
+        discovery = TelemetryBleDiscovery(this) { event -> runOnUiThread { reduceDiscovery(event) } }
+            .also { it.start() }
         setStatus("Scanning and advertising")
     }
 
@@ -206,22 +192,17 @@ class MeshLabActivity : ComponentActivity() {
                 renderPeers()
             }
             is DiscoveryEvent.Error -> setStatus(event.message)
-            is DiscoveryEvent.Started -> setStatus(
-                if (event.advertising) "BLE scan + advertise active" else "BLE scan active; advertising unavailable"
-            )
+            is DiscoveryEvent.Started -> setStatus(if (event.advertising) "BLE scan + advertise active" else "BLE scan active")
             DiscoveryEvent.Stopped -> setStatus("Discovery stopped")
         }
     }
 
     private fun renderPeers() {
-        peersContainer.removeAllViews()
+        peersView.removeAllViews()
         peers.values.sortedByDescending { it.rssi }.forEach { peer ->
-            peersContainer.addView(Button(this).apply {
-                text = "${peer.ephemeralId}  ${peer.rssi} dBm  Connect"
-                setOnClickListener {
-                    setStatus("Connecting to ${peer.ephemeralId}")
-                    transport.connect(peer.radioAddress)
-                }
+            peersView.addView(Button(this).apply {
+                text = "${peer.ephemeralId} · ${peer.rssi} dBm · Connect"
+                setOnClickListener { transport.connect(peer.radioAddress) }
             })
         }
     }
@@ -232,26 +213,31 @@ class MeshLabActivity : ComponentActivity() {
             is SecureTransportEvent.PendingVerification -> {
                 pendingDeviceId = event.deviceId
                 trustButton.isEnabled = true
-                setStatus("Verify safety code ${event.safetyCode} for ${event.deviceId}")
+                setStatus("Compare safety code ${event.safetyCode}")
             }
             is SecureTransportEvent.SessionTrusted -> {
                 pendingDeviceId = null
                 trustedDeviceId = event.deviceId
                 trustButton.isEnabled = false
-                advertiseButton.isEnabled = true
-                probeButton.isEnabled = true
+                routeButton.isEnabled = true
+                smallProbeButton.isEnabled = true
                 largeProbeButton.isEnabled = true
                 node.observeDirectPeer(event.deviceId, 0, "ble", System.currentTimeMillis())
-                setStatus("Trusted BLE mesh peer: ${event.deviceId}")
+                setStatus("Trusted peer ${event.deviceId}")
                 renderRoutes()
             }
-            is SecureTransportEvent.MessageReceived -> setStatus("Direct encrypted chat message received")
-            is SecureTransportEvent.DeliveryConfirmed -> setStatus("Direct message receipt verified")
+            is SecureTransportEvent.MeshRouteUpdated -> {
+                bindWifiForTrustedPeer()
+                setStatus("Verified route update from ${event.deviceId}: ${event.acceptedRoutes}")
+                renderRoutes()
+            }
+            is SecureTransportEvent.MessageReceived -> setStatus("Direct encrypted text received")
+            is SecureTransportEvent.DeliveryConfirmed -> setStatus("Direct signed receipt verified")
             is SecureTransportEvent.Disconnected -> {
                 trustedDeviceId?.let(node::peerUnavailable)
                 trustedDeviceId = null
-                advertiseButton.isEnabled = false
-                probeButton.isEnabled = false
+                routeButton.isEnabled = false
+                smallProbeButton.isEnabled = false
                 largeProbeButton.isEnabled = false
                 setStatus("Peer disconnected")
                 renderRoutes()
@@ -261,33 +247,24 @@ class MeshLabActivity : ComponentActivity() {
     }
 
     private fun trustPending() {
-        val deviceId = pendingDeviceId ?: return
-        if (transport.trustPeer(deviceId)) {
-            setStatus("Trust stored; secure mesh route can now be established")
-        } else {
-            setStatus("Unable to trust pending peer")
-        }
+        val id = pendingDeviceId ?: return
+        setStatus(if (transport.trustPeer(id)) "Trust stored" else "Unable to trust pending peer")
     }
 
     private fun advertiseRoute() {
-        val peerId = trustedDeviceId ?: return
-        val wire = endpoint.createRouteWire(peerId, System.currentTimeMillis())
-        val sent = transport.sendMeshRouteWire(peerId, wire)
-        setStatus(if (sent) "Signed TMA1 route advertisement sent (${wire.size} bytes)" else "Route advertisement could not be sent")
+        val peer = trustedDeviceId ?: return
+        val wire = endpoint.createRouteWire(peer, System.currentTimeMillis())
+        setStatus(if (transport.sendMeshRouteWire(peer, wire)) "Signed TMA1 sent (${wire.size} bytes)" else "TMA1 send failed")
     }
 
-    private fun sendRelayProbe(payloadBytes: Int) {
+    private fun sendProbe(payloadBytes: Int) {
         val firstHop = trustedDeviceId ?: return
         val target = targetInput.text.toString().trim()
-        if (target.isEmpty()) {
-            setStatus("Enter a target Telemetry device ID")
-            return
-        }
+        if (target.isEmpty()) return setStatus("Enter a target device ID")
         bindWifiForTrustedPeer()
         val now = System.currentTimeMillis()
-        val opaque = ByteArray(payloadBytes).also(SecureRandom()::nextBytes)
         val frame = OpaqueRelayFrame(
-            header = MeshRelayHeader(
+            MeshRelayHeader(
                 messageId = "lab-${UUID.randomUUID()}",
                 senderId = identity.deviceId,
                 recipientId = target,
@@ -297,58 +274,33 @@ class MeshLabActivity : ComponentActivity() {
                 createdAtEpochMs = now,
                 expiresAtEpochMs = now + 60_000L
             ),
-            encodedEnvelope = opaque
+            ByteArray(payloadBytes).also(SecureRandom()::nextBytes)
         )
         val result = node.sendOpaqueToNextHop(firstHop, frame)
-        setStatus(
-            if (result.sent) {
-                "Opaque relay probe sent via ${result.transportId} (${payloadBytes} payload bytes)"
-            } else {
-                "Relay probe not sent: ${result.reason}"
-            }
-        )
+        setStatus(if (result.sent) "Probe sent via ${result.transportId}" else "Probe queued/rejected: ${result.reason}")
     }
 
     private fun bindWifiForTrustedPeer(): Boolean {
-        val peerId = trustedDeviceId ?: return false
-        val capabilities = node.peerCapabilities(peerId, System.currentTimeMillis())
-        return wifiPort.bindPeerCapabilities(peerId, capabilities)
+        val peer = trustedDeviceId ?: return false
+        return wifiPort.bindPeerCapabilities(peer, node.peerCapabilities(peer, System.currentTimeMillis()))
     }
 
     private fun renderRoutes() {
         val now = System.currentTimeMillis()
-        val wifiBound = bindWifiForTrustedPeer()
-        val peerId = trustedDeviceId
-        val wifiState = if (peerId != null && wifiBound) wifiPort.peerState(peerId) else null
+        val peer = trustedDeviceId
+        val bound = bindWifiForTrustedPeer()
+        val wifi = if (peer != null && bound) wifiPort.peerState(peer) else null
         val routes = node.routeSnapshot(now)
-        val routeText = if (routes.isEmpty()) {
-            "No active routes"
-        } else {
-            routes.joinToString("\n") {
-                "${it.destinationId} via ${it.viaPeerId} · ${it.hops} hop(s) · ${it.transport} · q=${it.quality}"
-            }
-        }
         routesView.text = buildString {
-            append(routeText)
-            append("\n\nWi-Fi local: ")
-            append(
-                when {
-                    peerId == null -> "no trusted peer"
-                    !wifiBound -> "waiting for signed peer capability"
-                    wifiState?.available == true -> "available"
-                    else -> "capability verified; waiting for mDNS endpoint"
-                }
-            )
-            append("\nOpaque media chunks stored: ")
-            append(mediaStore.records(now).size)
+            if (routes.isEmpty()) append("No active routes")
+            else routes.forEach { append("${it.destinationId} via ${it.viaPeerId} · ${it.hops} hop(s) · ${it.transport} · q=${it.quality}\n") }
+            append("\nWi-Fi local: ")
+            append(if (wifi?.available == true) "available" else if (bound) "waiting for mDNS endpoint" else "waiting for signed capability")
+            append("\nEncrypted media chunks stored: ${mediaStore.records(now).size}")
         }
     }
 
     private fun setStatus(value: String) {
         statusView.text = value
-    }
-
-    companion object {
-        private const val MEDIA_RELAY_TTL_MS = 10 * 60_000L
     }
 }
