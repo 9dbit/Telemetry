@@ -2,6 +2,10 @@ package com.telemetry.app.media
 
 import android.content.Context
 import android.net.Uri
+import com.telemetry.app.call.AndroidCallSignalingChannel
+import com.telemetry.app.call.CALL_SIGNAL_CONTENT_TYPE
+import com.telemetry.app.call.CallSignalPort
+import com.telemetry.app.call.NativeCallSignal
 import com.telemetry.app.crypto.AndroidTrustStore
 import com.telemetry.app.crypto.DeviceIdentity
 import com.telemetry.app.mesh.AndroidMeshNodeRuntime
@@ -24,6 +28,12 @@ class AndroidMediaAppRuntime(
 ) {
     private var controllerRef: AndroidMediaTransferController? = null
     private var endpointRef: AndroidMeshWireEndpoint? = null
+    private var callChannelRef: AndroidCallSignalingChannel? = null
+
+    @Volatile
+    private var callSignalHandler: ((NativeCallSignal) -> Unit)? = null
+
+    private val controlChannel = AndroidTrustedControlChannel(identity, trustStore)
 
     private val wifiPort: AndroidWifiLocalMeshPort = AndroidWifiLocalMeshPort(
         context = context.applicationContext,
@@ -39,19 +49,27 @@ class AndroidMediaAppRuntime(
         localDeviceId = identity.deviceId,
         capabilities = listOf("ble", "mesh-relay", wifiPort.localCapability),
         onLocalDelivery = { frame ->
-            controllerRef?.let { controller ->
-                if (!controller.ingestLocalControlWire(frame.encodedEnvelope)) {
-                    controller.ingestIncomingChunk(frame.encodedEnvelope)
+            val wire = frame.encodedEnvelope
+            val contentType = runCatching { controlChannel.decode(wire).contentType }.getOrNull()
+            if (contentType == CALL_SIGNAL_CONTENT_TYPE) {
+                val signal = runCatching { callChannelRef?.openLocal(wire) }.getOrNull()
+                if (signal != null) callSignalHandler?.invoke(signal)
+            } else {
+                controllerRef?.let { controller ->
+                    if (!controller.ingestLocalControlWire(wire)) {
+                        controller.ingestIncomingChunk(wire)
+                    }
                 }
             }
         }
     )
 
     private val endpoint: AndroidMeshWireEndpoint = AndroidMeshWireEndpoint(identity, node)
+    private val callChannel = AndroidCallSignalingChannel(identity, controlChannel, node)
     private val controller: AndroidMediaTransferController = AndroidMediaTransferController(
         context = context.applicationContext,
         identity = identity,
-        controlChannel = AndroidTrustedControlChannel(identity, trustStore),
+        controlChannel = controlChannel,
         node = node,
         wifiPort = wifiPort,
         onEvent = onEvent
@@ -60,6 +78,7 @@ class AndroidMediaAppRuntime(
     init {
         endpointRef = endpoint
         controllerRef = controller
+        callChannelRef = callChannel
         gattTransport.attachMeshEndpoint(endpoint)
         gattTransport.setMeshRouteListener { peerId, _ ->
             controller.onPeerRouteChanged(peerId)
@@ -74,9 +93,27 @@ class AndroidMediaAppRuntime(
     }
 
     fun stop() {
+        callSignalHandler = null
         gattTransport.setMeshRouteListener(null)
         controller.stop()
         wifiPort.stop()
+    }
+
+    fun setCallSignalHandler(handler: ((NativeCallSignal) -> Unit)?) {
+        callSignalHandler = handler
+    }
+
+    fun callSignalPort(): CallSignalPort = callChannel
+
+    fun availableRealtimeTransports(
+        peerId: String,
+        nowEpochMs: Long = System.currentTimeMillis()
+    ): List<String> {
+        val capabilities = node.peerCapabilities(peerId, nowEpochMs)
+        wifiPort.bindPeerCapabilities(peerId, capabilities)
+        return buildList {
+            if (wifiPort.peerState(peerId).available) add("wifi-local")
+        }
     }
 
     fun observeTrustedPeer(peerId: String, nowEpochMs: Long = System.currentTimeMillis()) {
