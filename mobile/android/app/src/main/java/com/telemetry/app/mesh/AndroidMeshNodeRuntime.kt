@@ -25,6 +25,45 @@ class AndroidMeshNodeRuntime(
     fun sendOpaqueToNextHop(peerId: String, frame: OpaqueRelayFrame): MeshSendResult =
         transportCoordinator.send(peerId, frame)
 
+    fun sendOriginEnvelope(
+        recipientId: String,
+        messageId: String,
+        encodedEnvelope: ByteArray,
+        nowEpochMs: Long = System.currentTimeMillis(),
+        ttlMs: Long = 10 * 60_000L,
+        hopLimit: Int = 8
+    ): MeshSendResult {
+        require(recipientId.isNotBlank()) { "recipientId is required" }
+        require(messageId.isNotBlank()) { "messageId is required" }
+        require(encodedEnvelope.isNotEmpty()) { "encodedEnvelope is required" }
+        require(ttlMs in 1..(24 * 60 * 60_000L)) { "origin ttlMs invalid" }
+        require(hopLimit in 1..32) { "origin hopLimit invalid" }
+
+        val route = routeRuntime.snapshot(nowEpochMs)
+            .filter { it.destinationId == recipientId && it.viaPeerId != localDeviceId }
+            .sortedWith(
+                compareByDescending<MobileRouteEntry> { 100 - it.hops * 15 + it.quality }
+                    .thenBy { it.hops }
+            )
+            .firstOrNull()
+            ?: return MeshSendResult(false, reason = "no-route")
+
+        val frame = OpaqueRelayFrame(
+            header = MeshRelayHeader(
+                messageId = messageId,
+                senderId = localDeviceId,
+                recipientId = recipientId,
+                hopCount = 0,
+                hopLimit = hopLimit,
+                relayPath = listOf(localDeviceId),
+                createdAtEpochMs = nowEpochMs,
+                expiresAtEpochMs = nowEpochMs + ttlMs
+            ),
+            encodedEnvelope = encodedEnvelope.copyOf()
+        )
+        return transportCoordinator.send(route.viaPeerId, frame)
+    }
+
     fun observeDirectPeer(
         peerId: String,
         quality: Int,
