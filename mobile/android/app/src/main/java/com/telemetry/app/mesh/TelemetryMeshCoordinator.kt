@@ -1,18 +1,23 @@
 package com.telemetry.app.mesh
 
 interface MeshRouteResolver {
-    fun resolve(destinationId: String, excludePeerIds: Set<String> = emptySet()): MeshRouteEvidence?
+    fun resolve(
+        destinationId: String,
+        excludePeerIds: Set<String> = emptySet(),
+        nowEpochMs: Long
+    ): MeshRouteEvidence?
 }
 
 interface MeshNeighborSender {
-    fun send(nextHopPeerId: String, frame: OpaqueRelayFrame, transport: String): Boolean
+    fun send(nextHopPeerId: String, frame: OpaqueRelayFrame): MeshSendResult
 }
 
 data class MeshCoordinatorResult(
     val messageId: String,
     val state: String,
     val reason: String,
-    val route: MeshRouteEvidence? = null
+    val route: MeshRouteEvidence? = null,
+    val transportId: String? = null
 )
 
 data class MeshCoordinatorEvent(
@@ -66,36 +71,49 @@ class TelemetryMeshCoordinator(
         }
 
         val excluded = frame.header.relayPath.toMutableSet().apply { add(localDeviceId) }
-        val route = routeResolver.resolve(frame.header.recipientId, excluded)
+        val route = routeResolver.resolve(frame.header.recipientId, excluded, nowEpochMs)
             ?: return MeshCoordinatorResult(messageId, "stored", "no-route")
 
         if (route.viaPeerId in excluded) {
-            emit("drop", frame, route, "route-loop")
+            emit("drop", frame, route, reason = "route-loop")
             return MeshCoordinatorResult(messageId, "stored", "route-loop", route)
         }
 
         val forwardedHeader = runCatching { frame.header.advancedBy(localDeviceId) }.getOrElse {
-            emit("drop", frame, route, it.message ?: "forward-rejected")
+            emit("drop", frame, route, reason = it.message ?: "forward-rejected")
             return MeshCoordinatorResult(messageId, "dropped", it.message ?: "forward-rejected", route)
         }
         val forwarded = OpaqueRelayFrame(forwardedHeader, frame.encodedEnvelope.copyOf())
-        emit("route-selected", forwarded, route)
+        emit("route-selected", forwarded, route, reason = route.transport)
 
-        val sent = neighborSender.send(route.viaPeerId, forwarded, route.transport)
-        if (!sent) {
-            emit("retry", forwarded, route, "next-hop-send-failed")
-            return MeshCoordinatorResult(messageId, "stored", "next-hop-send-failed", route)
+        val sendResult = neighborSender.send(route.viaPeerId, forwarded)
+        if (!sendResult.sent) {
+            emit("retry", forwarded, route, sendResult.transportId, sendResult.reason)
+            return MeshCoordinatorResult(
+                messageId,
+                "stored",
+                sendResult.reason,
+                route,
+                sendResult.transportId
+            )
         }
 
         relayStore.remove(messageId)
-        emit("forwarded", forwarded, route)
-        return MeshCoordinatorResult(messageId, "forwarded", "next-hop-accepted", route)
+        emit("forwarded", forwarded, route, sendResult.transportId, sendResult.reason)
+        return MeshCoordinatorResult(
+            messageId,
+            "forwarded",
+            "next-hop-accepted",
+            route,
+            sendResult.transportId
+        )
     }
 
     private fun emit(
         type: String,
         frame: OpaqueRelayFrame,
         route: MeshRouteEvidence? = null,
+        transportId: String? = null,
         reason: String? = null
     ) {
         onEvent(
@@ -105,9 +123,43 @@ class TelemetryMeshCoordinator(
                 recipientId = frame.header.recipientId,
                 hopCount = frame.header.hopCount,
                 viaPeerId = route?.viaPeerId,
-                transport = route?.transport,
+                transport = transportId,
                 reason = reason
             )
         )
     }
+}
+
+class RouteRuntimeResolver(
+    private val runtime: RouteAdvertisementRuntime
+) : MeshRouteResolver {
+    override fun resolve(
+        destinationId: String,
+        excludePeerIds: Set<String>,
+        nowEpochMs: Long
+    ): MeshRouteEvidence? {
+        return runtime.snapshot(nowEpochMs)
+            .filter { it.destinationId == destinationId && it.viaPeerId !in excludePeerIds }
+            .sortedWith(
+                compareByDescending<MobileRouteEntry> { 100 - it.hops * 15 + it.quality }
+                    .thenBy { it.hops }
+            )
+            .firstOrNull()
+            ?.let {
+                MeshRouteEvidence(
+                    destinationId = it.destinationId,
+                    viaPeerId = it.viaPeerId,
+                    hops = it.hops,
+                    quality = it.quality,
+                    transport = it.transport
+                )
+            }
+    }
+}
+
+class TransportCoordinatorNeighborSender(
+    private val coordinator: MeshTransportCoordinator
+) : MeshNeighborSender {
+    override fun send(nextHopPeerId: String, frame: OpaqueRelayFrame): MeshSendResult =
+        coordinator.send(nextHopPeerId, frame)
 }
