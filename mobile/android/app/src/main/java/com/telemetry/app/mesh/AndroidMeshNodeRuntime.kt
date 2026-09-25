@@ -3,7 +3,8 @@ package com.telemetry.app.mesh
 class AndroidMeshNodeRuntime(
     val localDeviceId: String,
     capabilities: List<String> = listOf("ble", "mesh-relay"),
-    onEvent: (MeshCoordinatorEvent) -> Unit = {}
+    onEvent: (MeshCoordinatorEvent) -> Unit = {},
+    onLocalDelivery: (OpaqueRelayFrame) -> Unit = {}
 ) {
     private val routeRuntime = RouteAdvertisementRuntime(localDeviceId, capabilities)
     private val relayStore = InMemoryOpaqueRelayStore()
@@ -13,7 +14,8 @@ class AndroidMeshNodeRuntime(
         relayStore = relayStore,
         routeResolver = RouteRuntimeResolver(routeRuntime),
         neighborSender = TransportCoordinatorNeighborSender(transportCoordinator),
-        onEvent = onEvent
+        onEvent = onEvent,
+        onLocalDelivery = onLocalDelivery
     )
 
     fun registerTransport(adapter: MeshTransportAdapter) {
