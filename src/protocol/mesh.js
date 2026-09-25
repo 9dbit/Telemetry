@@ -153,6 +153,18 @@ export class MeshRouteTable {
     return candidates[0] || null;
   }
 
+  removeViaPeer(viaPeerId) {
+    if (!viaPeerId) return 0;
+    let removed = 0;
+    for (const [key, route] of this.routes) {
+      if (route.viaPeerId === viaPeerId) {
+        this.routes.delete(key);
+        removed += 1;
+      }
+    }
+    return removed;
+  }
+
   prune({ now = new Date() } = {}) {
     const nowMs = toMs(now);
     for (const [key, route] of this.routes) {
