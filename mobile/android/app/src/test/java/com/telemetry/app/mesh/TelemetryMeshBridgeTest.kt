@@ -39,6 +39,12 @@ class TelemetryMeshBridgeTest {
         assertEquals(1, pending.size)
         assertEquals("m-1", pending.single().header.messageId)
         assertArrayEquals(byteArrayOf(9, 8, 7, 6), pending.single().encodedEnvelope)
+
+        assertTrue(bridge.remove("m-1"))
+        assertEquals(
+            "duplicate",
+            bridge.ingest(original, "device-b", 1_500L).reason
+        )
     }
 
     @Test
