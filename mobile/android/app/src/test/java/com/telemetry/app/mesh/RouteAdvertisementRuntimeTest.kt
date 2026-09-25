@@ -11,6 +11,7 @@ class RouteAdvertisementRuntimeTest {
         sequence: Long,
         createdAt: Long = 1_000L,
         expiresAt: Long = 16_000L,
+        capabilities: List<String> = listOf("ble", "mesh-relay"),
         routes: List<AdvertisedRoute>
     ) = VerifiedRouteAdvertisement(
         protocol = "telemetry/mesh-route/0.1",
@@ -18,7 +19,7 @@ class RouteAdvertisementRuntimeTest {
         sequence = sequence,
         createdAtEpochMs = createdAt,
         expiresAtEpochMs = expiresAt,
-        capabilities = listOf("ble", "mesh-relay"),
+        capabilities = capabilities,
         routes = routes
     )
 
@@ -122,5 +123,52 @@ class RouteAdvertisementRuntimeTest {
 
         assertEquals("device-b", runtime.bestRoute("device-c", 1_500L)?.viaPeerId)
         assertEquals("wifi-direct", runtime.bestRoute("device-b", 1_500L)?.transport)
+    }
+
+    @Test
+    fun verifiedPeerCapabilitiesAreRetainedUntilAdvertisementExpiry() {
+        val runtime = RouteAdvertisementRuntime("device-a", listOf("ble"))
+        val wifiCapability = "wifi-local:abc123:def456"
+
+        assertEquals(
+            1,
+            runtime.ingestVerified(
+                verified(
+                    advertiserId = "device-b",
+                    sequence = 1,
+                    expiresAt = 2_000L,
+                    capabilities = listOf("ble", wifiCapability),
+                    routes = listOf(AdvertisedRoute("device-b", 0, 100, "self"))
+                ),
+                "device-b",
+                60,
+                "ble",
+                1_000L
+            )
+        )
+        assertEquals(listOf("ble", wifiCapability).sorted(), runtime.capabilitiesForPeer("device-b", 1_500L))
+        assertTrue(runtime.capabilitiesForPeer("device-b", 2_000L).isEmpty())
+    }
+
+    @Test
+    fun overlongCapabilityRejectsWholeAdvertisement() {
+        val runtime = RouteAdvertisementRuntime("device-a", listOf("ble"))
+        val tooLong = "x".repeat(65)
+        assertEquals(
+            0,
+            runtime.ingestVerified(
+                verified(
+                    advertiserId = "device-b",
+                    sequence = 1,
+                    capabilities = listOf(tooLong),
+                    routes = listOf(AdvertisedRoute("device-b", 0, 100, "self"))
+                ),
+                "device-b",
+                60,
+                "ble",
+                1_000L
+            )
+        )
+        assertTrue(runtime.capabilitiesForPeer("device-b", 1_500L).isEmpty())
     }
 }
