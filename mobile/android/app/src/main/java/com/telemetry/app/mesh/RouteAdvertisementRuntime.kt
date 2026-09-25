@@ -3,6 +3,7 @@ package com.telemetry.app.mesh
 private const val MAX_ROUTE_TTL_MS = 30_000L
 private const val MAX_ADVERTISED_ROUTES = 32
 private const val MAX_CAPABILITIES = 16
+private const val MAX_CAPABILITY_CHARS = 64
 
 data class MobileRouteEntry(
     val destinationId: String,
@@ -55,11 +56,13 @@ class RouteAdvertisementRuntime(
 ) {
     private val routes = LinkedHashMap<String, MobileRouteEntry>()
     private val lastSequence = LinkedHashMap<String, Long>()
+    private val peerCapabilities = LinkedHashMap<String, Pair<List<String>, Long>>()
     private var sequence = 0L
 
     init {
         require(localDeviceId.isNotBlank()) { "localDeviceId is required" }
         require(capabilities.size <= MAX_CAPABILITIES) { "too many capabilities" }
+        require(capabilities.all { it.length <= MAX_CAPABILITY_CHARS }) { "capability exceeds max length" }
     }
 
     fun observeDirectPeer(
@@ -86,6 +89,7 @@ class RouteAdvertisementRuntime(
     fun removeViaPeer(peerId: String): Int {
         val keys = routes.filterValues { it.viaPeerId == peerId }.keys.toList()
         keys.forEach(routes::remove)
+        peerCapabilities.remove(peerId)
         return keys.size
     }
 
@@ -136,10 +140,13 @@ class RouteAdvertisementRuntime(
         if (advertisement.expiresAtEpochMs <= nowEpochMs) return 0
         if (advertisement.expiresAtEpochMs - advertisement.createdAtEpochMs > MAX_ROUTE_TTL_MS) return 0
         if (advertisement.routes.size > MAX_ADVERTISED_ROUTES) return 0
+        if (advertisement.capabilities.size > MAX_CAPABILITIES) return 0
+        if (advertisement.capabilities.any { it.length > MAX_CAPABILITY_CHARS }) return 0
 
         val previous = lastSequence[fromPeerId]
         if (previous != null && advertisement.sequence <= previous) return 0
         lastSequence[fromPeerId] = advertisement.sequence
+        peerCapabilities[fromPeerId] = advertisement.capabilities.distinct().sorted() to advertisement.expiresAtEpochMs
 
         val remainingTtl = (advertisement.expiresAtEpochMs - nowEpochMs).coerceAtMost(MAX_ROUTE_TTL_MS)
         var accepted = 0
@@ -171,6 +178,12 @@ class RouteAdvertisementRuntime(
             .firstOrNull()
     }
 
+    fun capabilitiesForPeer(peerId: String, nowEpochMs: Long): List<String> {
+        prune(nowEpochMs)
+        val entry = peerCapabilities[peerId] ?: return emptyList()
+        return entry.first.toList()
+    }
+
     fun snapshot(nowEpochMs: Long): List<MobileRouteEntry> {
         prune(nowEpochMs)
         return routes.values.toList()
@@ -183,6 +196,7 @@ class RouteAdvertisementRuntime(
 
     private fun prune(nowEpochMs: Long) {
         routes.entries.removeIf { it.value.expiresAtEpochMs <= nowEpochMs }
+        peerCapabilities.entries.removeIf { it.value.second <= nowEpochMs }
     }
 
     private fun routeScore(route: MobileRouteEntry): Int = 100 - route.hops * 15 + route.quality
