@@ -1,6 +1,8 @@
 import { selectTransport } from './router.js';
 
 function frameBytes(frame) {
+  if (Buffer.isBuffer(frame?.wire)) return frame.wire.length;
+  if (frame?.wire instanceof Uint8Array) return frame.wire.byteLength;
   return Buffer.byteLength(JSON.stringify(frame || {}), 'utf8');
 }
 
