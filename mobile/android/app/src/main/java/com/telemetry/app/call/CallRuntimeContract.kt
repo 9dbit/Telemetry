@@ -8,25 +8,44 @@ interface CallDirectCapabilityProvider {
     fun availableTransports(peerId: String): List<String>
 }
 
-data class RealtimeCallPreparation(
-    val endpointToken: String
+data class NativeIceCandidate(
+    val candidate: String,
+    val sdpMid: String?,
+    val sdpMLineIndex: Int
 ) {
     init {
-        require(endpointToken.length in 8..512) { "invalid realtime endpoint token" }
+        require(candidate.isNotEmpty() && candidate.length <= CALL_MAX_ICE_CHARS) { "invalid ICE candidate" }
+        require(sdpMid == null || sdpMid.length <= 128) { "invalid ICE sdpMid" }
+        require(sdpMLineIndex in 0..255) { "invalid ICE sdpMLineIndex" }
     }
 }
 
+sealed interface RealtimeCallMediaEvent {
+    data class LocalOffer(val callId: String, val sessionDescription: String) : RealtimeCallMediaEvent
+    data class LocalAnswer(val callId: String, val sessionDescription: String) : RealtimeCallMediaEvent
+    data class LocalIceCandidate(val callId: String, val candidate: NativeIceCandidate) : RealtimeCallMediaEvent
+    data class Connected(val callId: String) : RealtimeCallMediaEvent
+    data class Disconnected(val callId: String, val reason: String) : RealtimeCallMediaEvent
+    data class Failed(val callId: String, val reason: String) : RealtimeCallMediaEvent
+}
+
 interface RealtimeCallMediaEngine {
+    fun setListener(listener: (RealtimeCallMediaEvent) -> Unit)
+
     fun prepare(
         callId: String,
         peerId: String,
         transport: String,
         isCaller: Boolean
-    ): RealtimeCallPreparation
+    ): Boolean
 
-    fun applyRemoteCandidate(callId: String, endpointToken: String): Boolean
+    fun createOffer(callId: String): Boolean
 
-    fun connect(callId: String): Boolean
+    fun applyRemoteOffer(callId: String, sessionDescription: String): Boolean
+
+    fun applyRemoteAnswer(callId: String, sessionDescription: String): Boolean
+
+    fun addRemoteIceCandidate(callId: String, candidate: NativeIceCandidate): Boolean
 
     fun setMuted(callId: String, muted: Boolean): Boolean
 
