@@ -1,0 +1,71 @@
+name: One-shot media ACK retry patch
+
+on:
+  push:
+    branches:
+      - feature/m1.5a-secure-media-foundation
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feature/m1.5a-secure-media-foundation
+          fetch-depth: 0
+      - name: Add cumulative ACK retry grace
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('mobile/android/app/src/main/java/com/telemetry/app/media/AndroidMediaTransferController.kt')
+          s = p.read_text()
+          marker = 'private const val FINAL_ACK_GRACE_MS = 5L * 60_000'
+          if marker in s:
+              print('ACK retry patch already present')
+              raise SystemExit(0)
+
+          def once(old, new, label):
+              global s
+              n = s.count(old)
+              if n != 1:
+                  raise SystemExit(f'{label}: expected 1 match, got {n}')
+              s = s.replace(old, new, 1)
+
+          once(
+              '        private const val CONTROL_RETRY_MS = 10_000L\n        private const val TICK_MS = 2_000L',
+              '        private const val CONTROL_RETRY_MS = 10_000L\n        private const val FINAL_ACK_GRACE_MS = 5L * 60_000\n        private const val TICK_MS = 2_000L',
+              'ack grace constant'
+          )
+          once(
+              '''        val manifest: NativeMediaManifest,\n        val expiresAtEpochMs: Long,\n        @Volatile var readyEmitted: Boolean = false\n    )''',
+              '''        val manifest: NativeMediaManifest,\n        val expiresAtEpochMs: Long,\n        @Volatile var readyEmitted: Boolean = false,\n        @Volatile var lastAckAttemptAt: Long = 0L,\n        @Volatile var readyAtEpochMs: Long? = null\n    )''',
+              'incoming ack state'
+          )
+          once(
+              '''        incoming.values.toList().forEach { runtime ->\n            if (runtime.expiresAtEpochMs <= now) incoming.remove(runtime.manifest.assetId)\n        }''',
+              '''        incoming.values.toList().forEach { runtime ->\n            if (runtime.expiresAtEpochMs <= now) {\n                incoming.remove(runtime.manifest.assetId)\n                return@forEach\n            }\n            val readyAt = runtime.readyAtEpochMs\n            val withinAckWindow = readyAt == null || now - readyAt <= FINAL_ACK_GRACE_MS\n            if (withinAckWindow && now - runtime.lastAckAttemptAt >= CONTROL_RETRY_MS) {\n                val progress = assembler.progress(runtime.manifest, now)\n                sendAck(runtime, progress, now)\n            }\n        }''',
+              'periodic cumulative ack'
+          )
+          once(
+              '''            if (assembler.verifyComplete(runtime.manifest, now)) {\n                runtime.readyEmitted = true\n                stateStore.removeIncomingControl(runtime.controlMessageId)''',
+              '''            if (assembler.verifyComplete(runtime.manifest, now)) {\n                runtime.readyEmitted = true\n                runtime.readyAtEpochMs = now\n                stateStore.removeIncomingControl(runtime.controlMessageId)''',
+              'ready timestamp'
+          )
+          once(
+              '''    private fun sendAck(runtime: IncomingRuntime, progress: NativeMediaReceiveProgress, now: Long) {\n        val ack = NativeMediaChunkAck(''',
+              '''    private fun sendAck(runtime: IncomingRuntime, progress: NativeMediaReceiveProgress, now: Long) {\n        runtime.lastAckAttemptAt = now\n        val ack = NativeMediaChunkAck(''',
+              'ack attempt timestamp'
+          )
+          p.write_text(s)
+          print('media ACK retry patch applied')
+          PY
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add mobile/android/app/src/main/java/com/telemetry/app/media/AndroidMediaTransferController.kt
+          git commit -m 'fix(media): retry cumulative ACK after packet loss' || exit 0
+          git push origin HEAD:feature/m1.5a-secure-media-foundation
