@@ -66,7 +66,11 @@ export class PostgresTelemetryStore {
           coalesce(sum((event_data->>'durationSeconds')::bigint) FILTER (WHERE event_type='call.summary'),0)::bigint AS call_seconds,
           coalesce(sum((event_data->>'bytes')::bigint) FILTER (WHERE event_type='media.transfer'),0)::bigint AS media_bytes,
           coalesce(sum((event_data->>'bytesSent')::bigint) FILTER (WHERE event_type='transport.usage'),0)::bigint AS transport_bytes_sent,
-          coalesce(sum((event_data->>'bytesReceived')::bigint) FILTER (WHERE event_type='transport.usage'),0)::bigint AS transport_bytes_received
+          coalesce(sum((event_data->>'bytesReceived')::bigint) FILTER (WHERE event_type='transport.usage'),0)::bigint AS transport_bytes_received,
+          coalesce(sum((event_data->>'messagesSent')::bigint) FILTER (WHERE event_type='communication.summary'),0)::bigint AS messages_sent,
+          coalesce(sum((event_data->>'messagesReceived')::bigint) FILTER (WHERE event_type='communication.summary'),0)::bigint AS messages_received,
+          coalesce(sum((event_data->>'cpuMs')::bigint) FILTER (WHERE event_type='resource.usage'),0)::bigint AS cpu_ms,
+          coalesce(sum((event_data->>'radioSeconds')::bigint) FILTER (WHERE event_type='resource.usage'),0)::bigint AS radio_seconds
         FROM telemetry_events
       ), download_stats AS (
         SELECT count(*)::int AS downloads FROM telemetry_downloads
@@ -161,5 +165,5 @@ export class PostgresTelemetryStore {
 }
 
 function shouldUseSsl(connectionString) {
-  return !/localhost|127\.0\.0\.1/.test(connectionString);
+  return !/localhost|127\.0\.0\.1|\.railway\.internal/.test(connectionString);
 }
