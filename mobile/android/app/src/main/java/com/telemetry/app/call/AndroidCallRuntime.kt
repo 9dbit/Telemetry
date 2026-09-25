@@ -22,10 +22,15 @@ class AndroidCallRuntime(
         var lastRemoteSequence: Long,
         var expiresAtEpochMs: Long,
         var selectedTransport: String? = null,
-        var mediaPrepared: Boolean = false
+        var mediaPrepared: Boolean = false,
+        var remoteConnected: Boolean = false
     )
 
     private var session: Session? = null
+
+    init {
+        mediaEngine.setListener(::handleMediaEvent)
+    }
 
     fun startOutgoing(
         peerId: String,
@@ -79,9 +84,7 @@ class AndroidCallRuntime(
             require(signal.toId == localDeviceId) { "call signal is not addressed to local device" }
 
             val current = session
-            if (signal.kind == "invite") {
-                return@runCatching ingestInvite(signal, nowEpochMs)
-            }
+            if (signal.kind == "invite") return@runCatching ingestInvite(signal, nowEpochMs)
             if (current == null) return@runCatching false
             if (signal.callId != current.callId || signal.fromId != current.peerId) return@runCatching false
             if (signal.sequence <= current.lastRemoteSequence) return@runCatching false
@@ -90,24 +93,19 @@ class AndroidCallRuntime(
             }
 
             val accepted = when (signal.kind) {
-                "ringing" -> {
-                    if (!current.isCaller || current.state !in setOf("outgoing-ringing", "outgoing")) false
-                    else {
-                        current.state = "outgoing-ringing"
-                        onEvent(NativeCallRuntimeEvent.OutgoingRinging(current.callId, current.peerId))
-                        true
-                    }
-                }
-                "accept" -> handleAccept(current, signal, nowEpochMs)
-                "candidate" -> handleCandidate(current, signal, nowEpochMs)
-                "connected" -> handleConnected(current, signal)
+                "ringing" -> handleRinging(current)
+                "accept" -> handleAccept(current, signal)
+                "offer" -> handleOffer(current, signal)
+                "answer" -> handleAnswer(current, signal)
+                "ice-candidate" -> handleIceCandidate(current, signal)
+                "connected" -> handleRemoteConnected(current, signal)
                 "decline", "busy", "cancel", "end" -> {
                     finish(current, signal.reason ?: signal.kind)
                     true
                 }
                 else -> false
             }
-            if (accepted) current.lastRemoteSequence = signal.sequence
+            if (accepted && session === current) current.lastRemoteSequence = signal.sequence
             accepted
         }.getOrElse {
             onEvent(NativeCallRuntimeEvent.Error(session?.callId, it.message ?: "call-signal-rejected"))
@@ -126,29 +124,19 @@ class AndroidCallRuntime(
             return false
         }
         return runCatching {
-            val prepared = mediaEngine.prepare(
-                callId = current.callId,
-                peerId = current.peerId,
-                transport = selected,
-                isCaller = false
-            )
+            require(mediaEngine.prepare(current.callId, current.peerId, selected, isCaller = false)) {
+                "call media prepare failed"
+            }
             current.selectedTransport = selected
             current.mediaPrepared = true
             current.state = "negotiating"
-            if (!sendSignal(current, "accept", nowEpochMs, transport = selected)) error("call accept signaling failed")
-            if (!sendSignal(
-                    current,
-                    "candidate",
-                    nowEpochMs,
-                    transport = selected,
-                    endpointToken = prepared.endpointToken
-                )
-            ) error("call candidate signaling failed")
+            require(sendSignal(current, "accept", nowEpochMs, transport = selected)) {
+                "call accept signaling failed"
+            }
             onEvent(NativeCallRuntimeEvent.Negotiating(current.callId, current.peerId, selected))
             true
         }.getOrElse {
-            if (current.mediaPrepared) mediaEngine.stop(current.callId)
-            current.mediaPrepared = false
+            finish(current, "call-accept-failed")
             onEvent(NativeCallRuntimeEvent.Error(current.callId, it.message ?: "call-accept-failed"))
             false
         }
@@ -255,74 +243,113 @@ class AndroidCallRuntime(
         return true
     }
 
-    private fun handleAccept(current: Session, signal: NativeCallSignal, nowEpochMs: Long): Boolean {
+    private fun handleRinging(current: Session): Boolean {
+        if (!current.isCaller || current.state !in setOf("outgoing-ringing", "outgoing")) return false
+        current.state = "outgoing-ringing"
+        onEvent(NativeCallRuntimeEvent.OutgoingRinging(current.callId, current.peerId))
+        return true
+    }
+
+    private fun handleAccept(current: Session, signal: NativeCallSignal): Boolean {
         if (!current.isCaller || current.state !in setOf("outgoing-ringing", "outgoing")) return false
         val transport = signal.transport ?: return false
         if (transport !in current.offeredTransports || transport !in directCapabilities(current.peerId)) return false
-        val prepared = mediaEngine.prepare(
-            callId = current.callId,
-            peerId = current.peerId,
-            transport = transport,
-            isCaller = true
-        )
+        if (!mediaEngine.prepare(current.callId, current.peerId, transport, isCaller = true)) return false
         current.selectedTransport = transport
         current.mediaPrepared = true
         current.state = "negotiating"
-        if (!sendSignal(
-                current,
-                "candidate",
-                nowEpochMs,
-                transport = transport,
-                endpointToken = prepared.endpointToken
-            )
-        ) {
-            mediaEngine.stop(current.callId)
-            current.mediaPrepared = false
+        if (!mediaEngine.createOffer(current.callId)) {
+            finish(current, "offer-create-failed")
             return false
         }
         onEvent(NativeCallRuntimeEvent.Negotiating(current.callId, current.peerId, transport))
         return true
     }
 
-    private fun handleCandidate(current: Session, signal: NativeCallSignal, nowEpochMs: Long): Boolean {
-        val transport = signal.transport ?: return false
-        if (transport !in directCapabilities(current.peerId)) return false
-        if (current.selectedTransport != null && current.selectedTransport != transport) return false
-        if (!current.mediaPrepared) {
-            val prepared = mediaEngine.prepare(
-                callId = current.callId,
-                peerId = current.peerId,
-                transport = transport,
-                isCaller = current.isCaller
-            )
-            current.mediaPrepared = true
-            current.selectedTransport = transport
-            current.state = "negotiating"
-            if (!sendSignal(
-                    current,
-                    "candidate",
-                    nowEpochMs,
-                    transport = transport,
-                    endpointToken = prepared.endpointToken
-                )
-            ) return false
-        }
-        if (!mediaEngine.applyRemoteCandidate(current.callId, signal.endpointToken ?: return false)) return false
-        if (!mediaEngine.connect(current.callId)) return false
-        current.state = "active"
-        current.selectedTransport = transport
-        sendSignal(current, "connected", nowEpochMs, transport = transport)
-        onEvent(NativeCallRuntimeEvent.Active(current.callId, current.peerId, transport))
-        return true
-    }
-
-    private fun handleConnected(current: Session, signal: NativeCallSignal): Boolean {
-        if (!current.mediaPrepared || current.state !in setOf("negotiating", "active")) return false
+    private fun handleOffer(current: Session, signal: NativeCallSignal): Boolean {
+        if (current.isCaller || current.state != "negotiating" || !current.mediaPrepared) return false
         val transport = signal.transport ?: return false
         if (current.selectedTransport != transport) return false
-        current.state = "active"
-        onEvent(NativeCallRuntimeEvent.Active(current.callId, current.peerId, transport))
-        return true
+        return mediaEngine.applyRemoteOffer(current.callId, signal.sessionDescription ?: return false)
+    }
+
+    private fun handleAnswer(current: Session, signal: NativeCallSignal): Boolean {
+        if (!current.isCaller || current.state != "negotiating" || !current.mediaPrepared) return false
+        val transport = signal.transport ?: return false
+        if (current.selectedTransport != transport) return false
+        return mediaEngine.applyRemoteAnswer(current.callId, signal.sessionDescription ?: return false)
+    }
+
+    private fun handleIceCandidate(current: Session, signal: NativeCallSignal): Boolean {
+        if (current.state !in setOf("negotiating", "active") || !current.mediaPrepared) return false
+        val transport = signal.transport ?: return false
+        if (current.selectedTransport != transport) return false
+        return mediaEngine.addRemoteIceCandidate(
+            current.callId,
+            NativeIceCandidate(
+                candidate = signal.iceCandidate ?: return false,
+                sdpMid = signal.sdpMid,
+                sdpMLineIndex = signal.sdpMLineIndex ?: return false
+            )
+        )
+    }
+
+    private fun handleRemoteConnected(current: Session, signal: NativeCallSignal): Boolean {
+        val transport = signal.transport ?: return false
+        if (current.selectedTransport != transport || !current.mediaPrepared) return false
+        current.remoteConnected = true
+        return current.state in setOf("negotiating", "active")
+    }
+
+    private fun handleMediaEvent(event: RealtimeCallMediaEvent) {
+        val current = session ?: return
+        if (event.callId != current.callId || !current.mediaPrepared) return
+        val transport = current.selectedTransport ?: return
+        val now = System.currentTimeMillis()
+        when (event) {
+            is RealtimeCallMediaEvent.LocalOffer -> {
+                if (!current.isCaller || current.state != "negotiating") return
+                if (!sendSignal(current, "offer", now, transport = transport, sessionDescription = event.sessionDescription)) {
+                    finish(current, "offer-signaling-failed")
+                }
+            }
+            is RealtimeCallMediaEvent.LocalAnswer -> {
+                if (current.isCaller || current.state != "negotiating") return
+                if (!sendSignal(current, "answer", now, transport = transport, sessionDescription = event.sessionDescription)) {
+                    finish(current, "answer-signaling-failed")
+                }
+            }
+            is RealtimeCallMediaEvent.LocalIceCandidate -> {
+                if (current.state !in setOf("negotiating", "active")) return
+                val candidate = event.candidate
+                if (!sendSignal(
+                        current,
+                        "ice-candidate",
+                        now,
+                        transport = transport,
+                        iceCandidate = candidate.candidate,
+                        sdpMid = candidate.sdpMid,
+                        sdpMLineIndex = candidate.sdpMLineIndex
+                    )
+                ) {
+                    onEvent(NativeCallRuntimeEvent.Error(current.callId, "ice-candidate-signaling-failed"))
+                }
+            }
+            is RealtimeCallMediaEvent.Connected -> {
+                if (current.state == "active") return
+                current.state = "active"
+                sendSignal(current, "connected", now, transport = transport)
+                onEvent(NativeCallRuntimeEvent.Active(current.callId, current.peerId, transport))
+            }
+            is RealtimeCallMediaEvent.Disconnected -> {
+                sendTerminal(current, "end", event.reason, now)
+                finish(current, event.reason)
+            }
+            is RealtimeCallMediaEvent.Failed -> {
+                sendTerminal(current, "end", event.reason, now)
+                finish(current, event.reason)
+            }
+        }
     }
 
     private fun sendTerminal(current: Session, kind: String, reason: String, nowEpochMs: Long) {
@@ -334,7 +361,10 @@ class AndroidCallRuntime(
         kind: String,
         nowEpochMs: Long,
         transport: String? = null,
-        endpointToken: String? = null,
+        sessionDescription: String? = null,
+        iceCandidate: String? = null,
+        sdpMid: String? = null,
+        sdpMLineIndex: Int? = null,
         reason: String? = null
     ): Boolean {
         current.localSequence += 1
@@ -347,16 +377,21 @@ class AndroidCallRuntime(
             sequence = current.localSequence,
             nowEpochMs = nowEpochMs,
             transport = transport,
-            endpointToken = endpointToken,
+            sessionDescription = sessionDescription,
+            iceCandidate = iceCandidate,
+            sdpMid = sdpMid,
+            sdpMLineIndex = sdpMLineIndex,
             reason = reason
         )
         return signalPort.send(signal, nowEpochMs)
     }
 
     private fun finish(current: Session, reason: String) {
-        if (current.mediaPrepared) mediaEngine.stop(current.callId)
-        onEvent(NativeCallRuntimeEvent.Ended(current.callId, current.peerId, reason))
+        if (session !== current) return
+        val wasPrepared = current.mediaPrepared
         session = null
+        if (wasPrepared) mediaEngine.stop(current.callId)
+        onEvent(NativeCallRuntimeEvent.Ended(current.callId, current.peerId, reason))
     }
 
     private fun directCapabilities(peerId: String): List<String> {
