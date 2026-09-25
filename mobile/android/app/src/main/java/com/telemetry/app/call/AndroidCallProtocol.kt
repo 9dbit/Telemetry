@@ -9,11 +9,13 @@ const val CALL_SIGNAL_VERSION = "telemetry/call-signal/0.1"
 const val CALL_SIGNAL_CONTENT_TYPE = "application/telemetry+call-signal"
 const val CALL_MEDIA_AUDIO = "audio"
 const val CALL_DEFAULT_TIMEOUT_MS = 45_000L
+const val CALL_MAX_SDP_CHARS = 48 * 1024
+const val CALL_MAX_ICE_CHARS = 8 * 1024
 
 val REALTIME_DIRECT_TRANSPORTS: List<String> = listOf("wifi-direct", "wifi-aware", "wifi-local")
 
 private val SIGNAL_KINDS = setOf(
-    "invite", "ringing", "accept", "candidate", "connected",
+    "invite", "ringing", "accept", "offer", "answer", "ice-candidate", "connected",
     "decline", "busy", "cancel", "end"
 )
 
@@ -31,7 +33,10 @@ data class NativeCallSignal(
     val expiresAt: String? = null,
     val directTransports: List<String> = emptyList(),
     val transport: String? = null,
-    val endpointToken: String? = null,
+    val sessionDescription: String? = null,
+    val iceCandidate: String? = null,
+    val sdpMid: String? = null,
+    val sdpMLineIndex: Int? = null,
     val reason: String? = null
 )
 
@@ -52,7 +57,10 @@ object AndroidCallProtocol {
         timeoutMs: Long = CALL_DEFAULT_TIMEOUT_MS,
         directTransports: List<String> = emptyList(),
         transport: String? = null,
-        endpointToken: String? = null,
+        sessionDescription: String? = null,
+        iceCandidate: String? = null,
+        sdpMid: String? = null,
+        sdpMLineIndex: Int? = null,
         reason: String? = null
     ): NativeCallSignal {
         val createdAt = Instant.ofEpochMilli(nowEpochMs).toString()
@@ -69,7 +77,10 @@ object AndroidCallProtocol {
             expiresAt = if (kind == "invite") Instant.ofEpochMilli(nowEpochMs + timeoutMs).toString() else null,
             directTransports = if (kind == "invite") directTransports.distinct() else emptyList(),
             transport = transport,
-            endpointToken = endpointToken,
+            sessionDescription = sessionDescription,
+            iceCandidate = iceCandidate,
+            sdpMid = sdpMid,
+            sdpMLineIndex = sdpMLineIndex,
             reason = reason
         )
         return validate(signal)
@@ -104,11 +115,16 @@ object AndroidCallProtocol {
             val ttl = expires - created
             require(ttl in 1..120_000L) { "call invite expiry invalid" }
         }
-        if (signal.kind in setOf("accept", "candidate", "connected")) {
+        if (signal.kind in setOf("accept", "offer", "answer", "ice-candidate", "connected")) {
             validateDirectTransport(signal.transport ?: error("call direct transport required"))
         }
-        if (signal.kind == "candidate") {
-            require(signal.endpointToken?.length in 8..512) { "invalid direct candidate token" }
+        if (signal.kind in setOf("offer", "answer")) {
+            require(signal.sessionDescription?.length in 8..CALL_MAX_SDP_CHARS) { "invalid WebRTC session description" }
+        }
+        if (signal.kind == "ice-candidate") {
+            require(signal.iceCandidate?.length in 1..CALL_MAX_ICE_CHARS) { "invalid ICE candidate" }
+            require(signal.sdpMid == null || signal.sdpMid.length <= 128) { "invalid ICE sdpMid" }
+            require(signal.sdpMLineIndex != null && signal.sdpMLineIndex in 0..255) { "invalid ICE sdpMLineIndex" }
         }
         require(signal.reason == null || signal.reason.length <= 160) { "invalid call reason" }
         return signal
@@ -128,11 +144,12 @@ object AndroidCallProtocol {
             .put("media", signal.media)
             .put("createdAt", signal.createdAt)
         signal.expiresAt?.let { json.put("expiresAt", it) }
-        if (signal.directTransports.isNotEmpty()) {
-            json.put("directTransports", JSONArray(signal.directTransports))
-        }
+        if (signal.directTransports.isNotEmpty()) json.put("directTransports", JSONArray(signal.directTransports))
         signal.transport?.let { json.put("transport", it) }
-        signal.endpointToken?.let { json.put("endpointToken", it) }
+        signal.sessionDescription?.let { json.put("sessionDescription", it) }
+        signal.iceCandidate?.let { json.put("iceCandidate", it) }
+        signal.sdpMid?.let { json.put("sdpMid", it) }
+        signal.sdpMLineIndex?.let { json.put("sdpMLineIndex", it) }
         signal.reason?.let { json.put("reason", it) }
         return json.toString().toByteArray(Charsets.UTF_8)
     }
@@ -158,7 +175,10 @@ object AndroidCallProtocol {
                 expiresAt = json.optString("expiresAt").takeIf(String::isNotEmpty),
                 directTransports = transports,
                 transport = json.optString("transport").takeIf(String::isNotEmpty),
-                endpointToken = json.optString("endpointToken").takeIf(String::isNotEmpty),
+                sessionDescription = json.optString("sessionDescription").takeIf(String::isNotEmpty),
+                iceCandidate = json.optString("iceCandidate").takeIf(String::isNotEmpty),
+                sdpMid = json.optString("sdpMid").takeIf(String::isNotEmpty),
+                sdpMLineIndex = if (json.has("sdpMLineIndex")) json.getInt("sdpMLineIndex") else null,
                 reason = json.optString("reason").takeIf(String::isNotEmpty)
             )
         )
