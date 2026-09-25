@@ -103,7 +103,14 @@ test('orchestrator uses transport coordinator without becoming transport-aware',
   const alice = generateDeviceIdentity();
   const bob = generateDeviceIdentity();
   const routes = new MeshRouteTable();
-  routes.observe({ destinationId: bob.deviceId, viaPeerId: bob.deviceId, hops: 1, quality: 80 });
+  routes.observe({
+    destinationId: bob.deviceId,
+    viaPeerId: bob.deviceId,
+    hops: 1,
+    quality: 80,
+    ttlMs: 120_000,
+    now: new Date('2026-09-25T04:00:00Z')
+  });
   const { coordinator, wifi, ble } = buildCoordinator(bob.deviceId);
   wifi.failNext(bob.deviceId, 'wifi interrupted');
 
