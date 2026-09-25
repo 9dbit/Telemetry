@@ -45,7 +45,9 @@ class AndroidMediaSourceAdapter(
             else -> "file"
         }
         val name = sanitizeFileName(metadata.first ?: fallbackName(uri, mime))
-        val size = metadata.second ?: resolveLength(uri)
+        val size = metadata.second
+            ?: resolveLength(uri)
+            ?: measureLength(uri)
         require(size in 1..MAX_MEDIA_SOURCE_BYTES) { "media source size invalid or exceeds 512 MiB" }
 
         return AndroidResolvedMediaSource(
@@ -70,7 +72,11 @@ class AndroidMediaSourceAdapter(
             val nameIndex = it.getColumnIndex(OpenableColumns.DISPLAY_NAME)
             val sizeIndex = it.getColumnIndex(OpenableColumns.SIZE)
             val name = if (nameIndex >= 0 && !it.isNull(nameIndex)) it.getString(nameIndex) else null
-            val size = if (sizeIndex >= 0 && !it.isNull(sizeIndex)) it.getLong(sizeIndex).takeIf { value -> value > 0 } else null
+            val size = if (sizeIndex >= 0 && !it.isNull(sizeIndex)) {
+                it.getLong(sizeIndex).takeIf { value -> value > 0 }
+            } else {
+                null
+            }
             return name to size
         }
     }
@@ -81,11 +87,27 @@ class AndroidMediaSourceAdapter(
         }
     }.getOrNull()
 
+    private fun measureLength(uri: Uri): Long {
+        val input = resolver.openInputStream(uri) ?: error("unable to open media source")
+        input.use {
+            val buffer = ByteArray(128 * 1024)
+            var total = 0L
+            while (true) {
+                val read = it.read(buffer)
+                if (read < 0) break
+                if (read == 0) continue
+                total += read
+                require(total <= MAX_MEDIA_SOURCE_BYTES) { "media source exceeds 512 MiB" }
+            }
+            return total
+        }
+    }
+
     private fun sanitizeFileName(value: String): String {
         val cleaned = value
             .replace(Regex("[\\u0000-\\u001f\\u007f]"), "_")
             .replace('/', '_')
-            .replace('\\\\', '_')
+            .replace('\\', '_')
             .trim()
             .take(255)
         return cleaned.ifBlank { "telemetry-media" }
