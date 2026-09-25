@@ -11,6 +11,11 @@ interface BleMeshRelayPort {
     fun sendRelayWire(peerId: String, bytes: ByteArray): Boolean
 }
 
+interface WifiLocalMeshRelayPort {
+    fun peerState(peerId: String): NativePeerLinkState
+    fun sendRelayWire(peerId: String, bytes: ByteArray): Boolean
+}
+
 interface WifiDirectMeshRelayPort {
     fun peerState(peerId: String): NativePeerLinkState
     fun sendRelayWire(peerId: String, bytes: ByteArray): Boolean
@@ -21,6 +26,28 @@ class BleMeshTransportAdapter(
 ) : MeshTransportAdapter {
     override val id: String = "ble"
     override val maxPayloadBytes: Int = 480
+    override val metered: Boolean = false
+
+    override fun describePeer(peerId: String): MeshPeerPath {
+        val state = port.peerState(peerId)
+        return MeshPeerPath(peerId, state.available, state.quality, state.metered)
+    }
+
+    override fun estimatedWireBytes(frame: OpaqueRelayFrame): Int =
+        MeshRelayWireCodec.encode(frame).size
+
+    override fun sendOpaque(peerId: String, frame: OpaqueRelayFrame): Boolean {
+        val wire = MeshRelayWireCodec.encode(frame)
+        if (wire.size > maxPayloadBytes) return false
+        return port.sendRelayWire(peerId, wire)
+    }
+}
+
+class WifiLocalMeshTransportAdapter(
+    private val port: WifiLocalMeshRelayPort
+) : MeshTransportAdapter {
+    override val id: String = "wifi-local"
+    override val maxPayloadBytes: Int = 2 * 1024 * 1024
     override val metered: Boolean = false
 
     override fun describePeer(peerId: String): MeshPeerPath {
