@@ -60,6 +60,7 @@ class AndroidMediaTransferController(
 ) {
     companion object {
         private const val TRANSFER_TTL_MS = 7L * 24 * 60 * 60_000
+        private const val MESH_FRAME_TTL_MS = 10L * 60_000
         private const val CONTROL_RETRY_MS = 10_000L
         private const val TICK_MS = 2_000L
     }
@@ -337,17 +338,28 @@ class AndroidMediaTransferController(
                 messageId = runtime.manifestMessageId,
                 encodedEnvelope = runtime.manifestControlWire,
                 nowEpochMs = now,
-                ttlMs = TRANSFER_TTL_MS,
+                ttlMs = MESH_FRAME_TTL_MS,
                 hopLimit = 8
             )
             runtime.lastManifestAttemptAt = now
             if (manifestResult.sent) runtime.lastTransport = manifestResult.transportId
         }
 
+        var chunkTransport: String? = null
         val pumpResult = runtime.pump.pump(nowEpochMs = now, maxChunks = 4) { wire ->
-            wifiPort.sendMediaChunkWire(runtime.peerId, wire)
+            val chunk = AndroidMediaChunkWireCodec.decode(wire)
+            val result = node.sendOriginEnvelope(
+                recipientId = runtime.peerId,
+                messageId = "media:${chunk.assetId}:${chunk.index}",
+                encodedEnvelope = wire,
+                nowEpochMs = now,
+                ttlMs = MESH_FRAME_TTL_MS,
+                hopLimit = 8
+            )
+            if (result.sent) chunkTransport = result.transportId
+            result.sent
         }
-        if (pumpResult.sentIndices.isNotEmpty()) runtime.lastTransport = "wifi-local"
+        if (pumpResult.sentIndices.isNotEmpty()) runtime.lastTransport = chunkTransport
         persist(runtime)
         val status = runtime.scheduler.status()
         onEvent(
@@ -413,7 +425,7 @@ class AndroidMediaTransferController(
             messageId = messageId,
             encodedEnvelope = wire,
             nowEpochMs = now,
-            ttlMs = TRANSFER_TTL_MS,
+            ttlMs = MESH_FRAME_TTL_MS,
             hopLimit = 8
         )
         if (!result.sent) {
