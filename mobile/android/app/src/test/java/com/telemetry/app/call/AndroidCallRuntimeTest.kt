@@ -24,27 +24,44 @@ class AndroidCallRuntimeTest {
     }
 
     private class FakeMediaEngine : RealtimeCallMediaEngine {
+        private var listener: (RealtimeCallMediaEvent) -> Unit = {}
         val prepared = mutableListOf<String>()
-        val remoteCandidates = mutableListOf<String>()
-        val connected = mutableListOf<String>()
+        val remoteOffers = mutableListOf<String>()
+        val remoteAnswers = mutableListOf<String>()
+        val remoteCandidates = mutableListOf<NativeIceCandidate>()
         val stopped = mutableListOf<String>()
         var muted = false
         var speaker = false
-        var connectAllowed = true
+        var prepareAllowed = true
 
-        override fun prepare(callId: String, peerId: String, transport: String, isCaller: Boolean): RealtimeCallPreparation {
-            prepared += "$callId|$peerId|$transport|$isCaller"
-            return RealtimeCallPreparation("endpoint-$transport-${if (isCaller) "caller" else "callee"}")
+        override fun setListener(listener: (RealtimeCallMediaEvent) -> Unit) {
+            this.listener = listener
         }
 
-        override fun applyRemoteCandidate(callId: String, endpointToken: String): Boolean {
-            remoteCandidates += "$callId|$endpointToken"
+        override fun prepare(callId: String, peerId: String, transport: String, isCaller: Boolean): Boolean {
+            if (!prepareAllowed) return false
+            prepared += "$callId|$peerId|$transport|$isCaller"
             return true
         }
 
-        override fun connect(callId: String): Boolean {
-            if (!connectAllowed) return false
-            connected += callId
+        override fun createOffer(callId: String): Boolean {
+            listener(RealtimeCallMediaEvent.LocalOffer(callId, "v=0\r\no=telemetry-caller 1 1 IN IP4 127.0.0.1\r\n"))
+            return true
+        }
+
+        override fun applyRemoteOffer(callId: String, sessionDescription: String): Boolean {
+            remoteOffers += sessionDescription
+            listener(RealtimeCallMediaEvent.LocalAnswer(callId, "v=0\r\no=telemetry-callee 1 1 IN IP4 127.0.0.1\r\n"))
+            return true
+        }
+
+        override fun applyRemoteAnswer(callId: String, sessionDescription: String): Boolean {
+            remoteAnswers += sessionDescription
+            return true
+        }
+
+        override fun addRemoteIceCandidate(callId: String, candidate: NativeIceCandidate): Boolean {
+            remoteCandidates += candidate
             return true
         }
 
@@ -60,6 +77,19 @@ class AndroidCallRuntimeTest {
 
         override fun stop(callId: String) {
             stopped += callId
+        }
+
+        fun emitLocalIce(callId: String) {
+            listener(
+                RealtimeCallMediaEvent.LocalIceCandidate(
+                    callId,
+                    NativeIceCandidate("candidate:1 1 UDP 1 192.168.1.2 5000 typ host", "0", 0)
+                )
+            )
+        }
+
+        fun emitConnected(callId: String) {
+            listener(RealtimeCallMediaEvent.Connected(callId))
         }
     }
 
@@ -87,7 +117,7 @@ class AndroidCallRuntimeTest {
     }
 
     @Test
-    fun outgoingCallNegotiatesDirectWifiAndActivatesFakeMediaEngine() {
+    fun outgoingCallUsesEncryptedOfferAnswerIceAndActivatesOnlyOnMediaEngineConnection() {
         val port = RecordingSignalPort()
         val engine = FakeMediaEngine()
         val events = mutableListOf<NativeCallRuntimeEvent>()
@@ -125,11 +155,15 @@ class AndroidCallRuntimeTest {
             transport = "wifi-local"
         ), now + 2_000))
         assertEquals("negotiating", runtime.state())
-        assertEquals("candidate", port.sent.last().kind)
+        assertEquals("offer", port.sent.last().kind)
         assertEquals("wifi-local", runtime.selectedTransport())
 
+        engine.emitLocalIce(callId)
+        assertEquals("ice-candidate", port.sent.last().kind)
+
+        val answerSdp = "v=0\r\no=remote-answer 1 1 IN IP4 127.0.0.1\r\n"
         assertTrue(runtime.ingest(AndroidCallProtocol.createSignal(
-            kind = "candidate",
+            kind = "answer",
             callId = callId,
             callerId = caller,
             calleeId = callee,
@@ -137,10 +171,28 @@ class AndroidCallRuntimeTest {
             sequence = 3,
             nowEpochMs = now + 3_000,
             transport = "wifi-local",
-            endpointToken = "remote-endpoint-token-0001"
+            sessionDescription = answerSdp
         ), now + 3_000))
+        assertEquals(listOf(answerSdp), engine.remoteAnswers)
+
+        assertTrue(runtime.ingest(AndroidCallProtocol.createSignal(
+            kind = "ice-candidate",
+            callId = callId,
+            callerId = caller,
+            calleeId = callee,
+            fromId = callee,
+            sequence = 4,
+            nowEpochMs = now + 4_000,
+            transport = "wifi-local",
+            iceCandidate = "candidate:2 1 UDP 1 192.168.1.3 5001 typ host",
+            sdpMid = "0",
+            sdpMLineIndex = 0
+        ), now + 4_000))
+        assertEquals(1, engine.remoteCandidates.size)
+        assertEquals("negotiating", runtime.state())
+
+        engine.emitConnected(callId)
         assertEquals("active", runtime.state())
-        assertTrue(engine.connected.contains(callId))
         assertEquals("connected", port.sent.last().kind)
         assertTrue(runtime.setMuted(true))
         assertTrue(runtime.setSpeakerEnabled(true))
@@ -153,17 +205,17 @@ class AndroidCallRuntimeTest {
             callerId = caller,
             calleeId = callee,
             fromId = callee,
-            sequence = 4,
-            nowEpochMs = now + 4_000,
+            sequence = 5,
+            nowEpochMs = now + 5_000,
             reason = "remote-hangup"
-        ), now + 4_000))
+        ), now + 5_000))
         assertEquals("idle", runtime.state())
         assertTrue(engine.stopped.contains(callId))
         assertTrue(events.any { it is NativeCallRuntimeEvent.Active })
     }
 
     @Test
-    fun incomingCallRingsAcceptsAndSendsCandidateUsingCommonDirectTransport() {
+    fun incomingCallAcceptsRemoteOfferAndEmitsAnswerOnCommonDirectTransport() {
         val port = RecordingSignalPort()
         val engine = FakeMediaEngine()
         val events = mutableListOf<NativeCallRuntimeEvent>()
@@ -191,9 +243,24 @@ class AndroidCallRuntimeTest {
 
         assertTrue(runtime.acceptIncoming(now + 1_000))
         assertEquals("negotiating", runtime.state())
-        assertEquals(listOf("ringing", "accept", "candidate"), port.sent.map { it.kind })
+        assertEquals(listOf("ringing", "accept"), port.sent.map { it.kind })
         assertEquals("wifi-aware", runtime.selectedTransport())
         assertTrue(engine.prepared.single().contains("wifi-aware"))
+
+        val offerSdp = "v=0\r\no=remote-offer 1 1 IN IP4 127.0.0.1\r\n"
+        assertTrue(runtime.ingest(AndroidCallProtocol.createSignal(
+            kind = "offer",
+            callId = callId,
+            callerId = caller,
+            calleeId = callee,
+            fromId = caller,
+            sequence = 2,
+            nowEpochMs = now + 2_000,
+            transport = "wifi-aware",
+            sessionDescription = offerSdp
+        ), now + 2_000))
+        assertEquals(listOf(offerSdp), engine.remoteOffers)
+        assertEquals("answer", port.sent.last().kind)
         assertTrue(events.any { it is NativeCallRuntimeEvent.IncomingRinging })
     }
 
