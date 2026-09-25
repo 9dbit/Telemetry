@@ -26,6 +26,7 @@ interface MeshTransportAdapter {
     val metered: Boolean
 
     fun describePeer(peerId: String): MeshPeerPath
+    fun estimatedWireBytes(frame: OpaqueRelayFrame): Int = frame.encodedEnvelope.size
     fun sendOpaque(peerId: String, frame: OpaqueRelayFrame): Boolean
 }
 
@@ -72,21 +73,28 @@ class MeshTransportCoordinator(
 
     fun send(peerId: String, frame: OpaqueRelayFrame): MeshSendResult {
         require(peerId.isNotBlank()) { "peerId is required" }
-        val payloadBytes = frame.encodedEnvelope.size
+        val policyPayloadBytes = frame.encodedEnvelope.size
         val candidates = adapters.values
             .map { adapter ->
                 val path = adapter.describePeer(peerId)
-                Triple(adapter, path, transportScore(adapter, path, payloadBytes))
+                val wireBytes = adapter.estimatedWireBytes(frame)
+                Candidate(
+                    adapter = adapter,
+                    path = path,
+                    wireBytes = wireBytes,
+                    score = transportScore(adapter, path, policyPayloadBytes)
+                )
             }
-            .filter { (adapter, path, _) -> path.available && payloadBytes <= adapter.maxPayloadBytes }
-            .sortedByDescending { (_, _, score) -> score }
+            .filter { it.path.available && it.wireBytes <= it.adapter.maxPayloadBytes }
+            .sortedByDescending { it.score }
 
         if (candidates.isEmpty()) {
             return MeshSendResult(false, reason = "no-transport-available")
         }
 
         val attempts = mutableListOf<MeshSendAttempt>()
-        for ((adapter, _, _) in candidates) {
+        for (candidate in candidates) {
+            val adapter = candidate.adapter
             try {
                 val accepted = adapter.sendOpaque(peerId, frame)
                 attempts += MeshSendAttempt(adapter.id, accepted)
@@ -105,4 +113,11 @@ class MeshTransportCoordinator(
 
         return MeshSendResult(false, attempts = attempts.toList(), reason = "all-transports-failed")
     }
+
+    private data class Candidate(
+        val adapter: MeshTransportAdapter,
+        val path: MeshPeerPath,
+        val wireBytes: Int,
+        val score: Int
+    )
 }
