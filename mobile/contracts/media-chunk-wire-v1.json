@@ -1,0 +1,32 @@
+{
+  "version": "telemetry-media-chunk-wire/1",
+  "magic": "TMC1",
+  "purpose": "Cross-platform compact wire format for independently encrypted media chunks.",
+  "fields": [
+    { "name": "assetId", "type": "utf8-u16", "maxBytes": 128 },
+    { "name": "index", "type": "u32-be" },
+    { "name": "count", "type": "u32-be", "max": 8192 },
+    { "name": "plainBytes", "type": "u32-be", "max": 1048576 },
+    { "name": "nonce", "type": "raw", "bytes": 12 },
+    { "name": "tag", "type": "raw", "bytes": 16 },
+    { "name": "ciphertextLength", "type": "u32-be", "max": 1048576 },
+    { "name": "ciphertext", "type": "raw", "lengthFrom": "ciphertextLength" }
+  ],
+  "privacy": {
+    "relayVisible": ["random assetId", "chunk index", "chunk count", "encrypted byte length"],
+    "relayHidden": ["filename", "mimeType", "contentKey", "plaintext hash", "plaintext bytes"]
+  },
+  "security": {
+    "chunkCipher": "AES-256-GCM",
+    "nonceBytes": 12,
+    "tagBytes": 16,
+    "aadBinds": ["version", "assetId", "index", "count", "plainBytes"],
+    "contentKeyDelivery": "encrypted signed media manifest only"
+  },
+  "transport": {
+    "selectionOwnedBy": "TransportCoordinator",
+    "stableRetryId": "media:<assetId>:<index>",
+    "retryReusesSameEncryptedChunkBytes": true,
+    "largePayloadPreferred": ["wifi-direct", "wifi-local", "wifi-aware"]
+  }
+}
