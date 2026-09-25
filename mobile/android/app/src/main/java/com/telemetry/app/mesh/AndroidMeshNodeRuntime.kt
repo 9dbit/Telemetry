@@ -20,6 +20,9 @@ class AndroidMeshNodeRuntime(
         transportCoordinator.register(adapter)
     }
 
+    fun sendOpaqueToNextHop(peerId: String, frame: OpaqueRelayFrame): MeshSendResult =
+        transportCoordinator.send(peerId, frame)
+
     fun observeDirectPeer(
         peerId: String,
         quality: Int,
