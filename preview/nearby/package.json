@@ -1,0 +1,12 @@
+{
+  "name": "telemetry-nearby-preview",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Telemetry M1.3 Nearby Intelligence interactive product preview",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
