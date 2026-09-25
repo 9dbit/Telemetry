@@ -39,7 +39,11 @@ class AndroidMediaAppRuntime(
         localDeviceId = identity.deviceId,
         capabilities = listOf("ble", "mesh-relay", wifiPort.localCapability),
         onLocalDelivery = { frame ->
-            controllerRef?.ingestLocalControlWire(frame.encodedEnvelope)
+            controllerRef?.let { controller ->
+                if (!controller.ingestLocalControlWire(frame.encodedEnvelope)) {
+                    controller.ingestIncomingChunk(frame.encodedEnvelope)
+                }
+            }
         }
     )
 
@@ -100,7 +104,7 @@ class AndroidMediaAppRuntime(
         )
     }
 
-    fun materializeIncomingToCache(assetId: String): File =
+    fun materializeIncomingToCache(assetId: String): File? =
         controller.materializeIncomingToCache(assetId)
 
     fun routeSnapshot(): List<MobileRouteEntry> =
