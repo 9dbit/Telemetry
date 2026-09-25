@@ -167,7 +167,8 @@ class RouteAdvertisementRuntime(
         prune(nowEpochMs)
         return routes.values
             .filter { it.destinationId == destinationId }
-            .maxWithOrNull(compareBy<MobileRouteEntry> { routeScore(it) }.thenByDescending { -it.hops })
+            .sortedWith(compareByDescending<MobileRouteEntry> { routeScore(it) }.thenBy { it.hops })
+            .firstOrNull()
     }
 
     fun snapshot(nowEpochMs: Long): List<MobileRouteEntry> {
