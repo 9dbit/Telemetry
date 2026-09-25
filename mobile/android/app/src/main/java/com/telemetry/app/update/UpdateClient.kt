@@ -18,16 +18,23 @@ internal data class UpdateInfo(
     val updateAvailable: Boolean,
     val versionCode: Long,
     val versionName: String,
+    val minimumVersionCode: Long,
+    val mandatory: Boolean,
     val apkUrl: String,
     val sha256: String,
-    val notes: String
+    val sizeBytes: Long,
+    val packageName: String,
+    val signingCertificateSha256: String,
+    val notes: String,
+    val publishedAt: String
 )
 
 internal object UpdateClient {
-    private const val ENDPOINT = "https://telemetry-web-production.up.railway.app/api/v1/android/update"
+    private const val ENDPOINT = "https://telemetry-update-controller-production.up.railway.app/api/mobile/android/latest"
+    private const val CHANNEL = "preview"
 
     fun check(): UpdateInfo {
-        val url = URL("$ENDPOINT?channel=preview&versionCode=${BuildConfig.VERSION_CODE}")
+        val url = URL("$ENDPOINT?channel=$CHANNEL")
         val connection = (url.openConnection() as HttpURLConnection).apply {
             requestMethod = "GET"
             connectTimeout = 1800
@@ -37,25 +44,63 @@ internal object UpdateClient {
         }
         try {
             val code = connection.responseCode
+            if (code == 404) {
+                return currentInfo()
+            }
             require(code in 200..299) { "Update service unavailable ($code)" }
             val body = connection.inputStream.bufferedReader().use { it.readText() }
             val json = JSONObject(body)
+            val remoteVersion = json.getLong("versionCode")
+            val minimum = json.optLong("minimumVersionCode", 0L)
+            val expectedPackage = json.getString("packageName")
+            require(expectedPackage == BuildConfig.APPLICATION_ID) { "Update manifest package mismatch" }
+            val certificateFingerprint = json.getString("signingCertificateSha256").uppercase()
+            require(certificateFingerprint.matches(Regex("[A-F0-9]{64}"))) { "Update signing fingerprint is invalid" }
+            val sha = json.getString("sha256").lowercase()
+            require(sha.matches(Regex("[a-f0-9]{64}"))) { "Update checksum is invalid" }
+            val apkUrl = json.getString("apkUrl")
+            require(apkUrl.startsWith("https://github.com/9dbit/Telemetry/releases/download/android-preview-")) {
+                "Update URL is not an approved Telemetry release"
+            }
             return UpdateInfo(
-                updateAvailable = json.optBoolean("updateAvailable", false),
-                versionCode = json.optLong("versionCode", BuildConfig.VERSION_CODE.toLong()),
-                versionName = json.optString("versionName", BuildConfig.VERSION_NAME),
-                apkUrl = json.optString("apkUrl"),
-                sha256 = json.optString("sha256").lowercase(),
-                notes = json.optString("notes", "Telemetry Android Preview update")
+                updateAvailable = remoteVersion > BuildConfig.VERSION_CODE.toLong(),
+                versionCode = remoteVersion,
+                versionName = json.getString("versionName"),
+                minimumVersionCode = minimum,
+                mandatory = json.optBoolean("mandatory", false),
+                apkUrl = apkUrl,
+                sha256 = sha,
+                sizeBytes = json.getLong("sizeBytes"),
+                packageName = expectedPackage,
+                signingCertificateSha256 = certificateFingerprint,
+                notes = json.optString("releaseNotes", "Telemetry Android Preview update"),
+                publishedAt = json.optString("publishedAt", "")
             )
         } finally {
             connection.disconnect()
         }
     }
 
+    private fun currentInfo() = UpdateInfo(
+        updateAvailable = false,
+        versionCode = BuildConfig.VERSION_CODE.toLong(),
+        versionName = BuildConfig.VERSION_NAME,
+        minimumVersionCode = 0L,
+        mandatory = false,
+        apkUrl = "",
+        sha256 = "",
+        sizeBytes = 0L,
+        packageName = BuildConfig.APPLICATION_ID,
+        signingCertificateSha256 = "",
+        notes = "No promoted preview release is available yet.",
+        publishedAt = ""
+    )
+
     fun download(context: Context, info: UpdateInfo, onProgress: (Int) -> Unit): File {
+        require(info.updateAvailable) { "No newer update is available" }
         require(info.apkUrl.startsWith("https://")) { "Update URL must use HTTPS" }
         require(info.sha256.matches(Regex("[a-f0-9]{64}"))) { "Update checksum is missing" }
+        require(info.packageName == context.packageName) { "Update package does not match this app" }
 
         val targetDir = File(context.cacheDir, "updates").apply { mkdirs() }
         val partial = File(targetDir, "telemetry-preview-${info.versionCode}.apk.part")
@@ -71,7 +116,11 @@ internal object UpdateClient {
         }
         try {
             require(connection.responseCode in 200..299) { "APK download failed (${connection.responseCode})" }
-            val total = connection.contentLengthLong.coerceAtLeast(1L)
+            val declaredLength = connection.contentLengthLong
+            if (declaredLength > 0 && info.sizeBytes > 0) {
+                require(declaredLength == info.sizeBytes) { "APK size does not match release manifest" }
+            }
+            val total = if (info.sizeBytes > 0) info.sizeBytes else declaredLength.coerceAtLeast(1L)
             connection.inputStream.use { input ->
                 partial.outputStream().use { output ->
                     val buffer = ByteArray(64 * 1024)
@@ -81,8 +130,9 @@ internal object UpdateClient {
                         if (count < 0) break
                         output.write(buffer, 0, count)
                         received += count
-                        onProgress(((received * 100L) / total).toInt().coerceIn(0, 100))
+                        onProgress(((received * 100L) / total.coerceAtLeast(1L)).toInt().coerceIn(0, 100))
                     }
+                    if (info.sizeBytes > 0) require(received == info.sizeBytes) { "APK download size mismatch" }
                 }
             }
         } finally {
@@ -122,7 +172,12 @@ internal object UpdateClient {
             @Suppress("DEPRECATION")
             pm.getPackageInfo(context.packageName, PackageManager.GET_SIGNATURES)
         }
-        require(signingDigest(installed) == signingDigest(archive)) { "Update signing certificate does not match" }
+        val installedDigest = signingDigest(installed)
+        val archiveDigest = signingDigest(archive)
+        require(installedDigest == archiveDigest) { "Update signing certificate does not match installed app" }
+        require(archiveDigest.equals(info.signingCertificateSha256, ignoreCase = true)) {
+            "Update signing certificate does not match promoted release manifest"
+        }
     }
 
     private fun signingDigest(info: PackageInfo): String {
@@ -134,7 +189,7 @@ internal object UpdateClient {
         } ?: error("APK signing certificate unavailable")
         return MessageDigest.getInstance("SHA-256")
             .digest(certificate)
-            .joinToString("") { "%02x".format(it) }
+            .joinToString("") { "%02X".format(it) }
     }
 
     private fun sha256(file: File): String {
