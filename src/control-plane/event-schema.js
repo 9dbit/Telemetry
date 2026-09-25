@@ -5,6 +5,8 @@ const EVENT_TYPES = new Set([
   'profile.updated',
   'contacts.snapshot',
   'transport.usage',
+  'communication.summary',
+  'resource.usage',
   'media.transfer',
   'call.summary',
   'screen.time',
@@ -64,6 +66,13 @@ function validateData(type, data) {
   if (type === 'transport.usage') {
     if (!TRANSPORTS.has(data.transport)) return 'invalid transport';
     if (!nonNegativeInt(data.bytesSent) || !nonNegativeInt(data.bytesReceived)) return 'invalid transport byte counters';
+  }
+  if (type === 'communication.summary') {
+    if (!nonNegativeInt(data.messagesSent) || !nonNegativeInt(data.messagesReceived) || !nonNegativeInt(data.activeConversations)) return 'invalid communication counters';
+  }
+  if (type === 'resource.usage') {
+    if (!nonNegativeInt(data.cpuMs) || !nonNegativeInt(data.radioSeconds)) return 'invalid resource counters';
+    if (data.batteryPermille != null && (!nonNegativeInt(data.batteryPermille) || data.batteryPermille > 1000)) return 'invalid battery usage';
   }
   if (type === 'media.transfer') {
     if (!MEDIA_KINDS.has(data.kind)) return 'invalid media kind';
