@@ -1,0 +1,29 @@
+name: Update Controller
+
+permissions:
+  contents: read
+
+on:
+  pull_request:
+    paths:
+      - "update-controller/**"
+      - ".github/workflows/update-controller.yml"
+  push:
+    branches: [main]
+    paths:
+      - "update-controller/**"
+      - ".github/workflows/update-controller.yml"
+
+jobs:
+  test-update-controller:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: update-controller
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Test update controller
+        run: npm test
