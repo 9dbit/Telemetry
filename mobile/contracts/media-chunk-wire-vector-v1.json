@@ -1,0 +1,15 @@
+{
+  "version": "telemetry-media-chunk-wire-vector/1",
+  "chunk": {
+    "version": "telemetry/media-chunk/0.1",
+    "assetId": "asset-demo-0001",
+    "index": 1,
+    "count": 3,
+    "plainBytes": 4,
+    "nonce": "AAECAwQFBgcICQoL",
+    "ciphertext": "3q2-7w",
+    "tag": "EBESExQVFhcYGRobHB0eHw"
+  },
+  "expectedWireHex": "544d4331000f61737365742d64656d6f2d30303031000000010000000300000004000102030405060708090a0b101112131415161718191a1b1c1d1e1f00000004deadbeef",
+  "wireBytes": 69
+}
