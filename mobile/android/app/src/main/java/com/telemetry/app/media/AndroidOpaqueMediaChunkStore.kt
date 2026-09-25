@@ -37,7 +37,12 @@ class AndroidOpaqueMediaChunkStore(
         val dataFile = File(dir, "${chunk.index}.tmc1")
         val expiryFile = File(dir, "${chunk.index}.expires")
         if (dataFile.exists()) {
-            return MediaChunkStoreResult(false, "duplicate", chunk.assetId, chunk.index)
+            val existing = runCatching { dataFile.readBytes() }.getOrNull()
+            return if (existing != null && MessageDigest.isEqual(existing, wire)) {
+                MediaChunkStoreResult(false, "duplicate", chunk.assetId, chunk.index)
+            } else {
+                MediaChunkStoreResult(false, "conflict", chunk.assetId, chunk.index)
+            }
         }
 
         atomicWrite(dataFile, wire)
