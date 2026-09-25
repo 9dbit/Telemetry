@@ -21,12 +21,28 @@ function exportDer(key, type) {
   return key.export({ format: 'der', type });
 }
 
-export function fingerprintPublicKey(publicKeyDer) {
-  return createHash('sha256').update(publicKeyDer).digest('hex');
+export function rawEd25519PublicKeyFromSpki(signingPublicKey) {
+  const publicKey = createPublicKey({
+    key: fromB64Url(signingPublicKey),
+    format: 'der',
+    type: 'spki'
+  });
+  const jwk = publicKey.export({ format: 'jwk' });
+  if (jwk.kty !== 'OKP' || jwk.crv !== 'Ed25519' || !jwk.x) {
+    throw new Error('signing public key is not Ed25519');
+  }
+  const raw = fromB64Url(jwk.x);
+  if (raw.length !== 32) throw new Error('Ed25519 public key must be 32 bytes');
+  return raw;
+}
+
+export function fingerprintPublicKey(publicKeyBytes) {
+  return createHash('sha256').update(publicKeyBytes).digest('hex');
 }
 
 export function deviceIdFromSigningPublicKey(signingPublicKey) {
-  const fingerprint = fingerprintPublicKey(fromB64Url(signingPublicKey));
+  const rawPublicKey = rawEd25519PublicKeyFromSpki(signingPublicKey);
+  const fingerprint = fingerprintPublicKey(rawPublicKey);
   return `tlm:device:${fingerprint.slice(0, 32)}`;
 }
 
