@@ -35,8 +35,8 @@ async function loadOverview() {
     status('Connected', true);
     $('#metricGrid').innerHTML = metricDefs.map(([label,key,note]) => `<div class="metric"><span>${label}</span><strong>${formatMetric(key, overview[key])}</strong><small>${note}</small></div>`).join('');
     const usage = [
-      ['Media transfers', Number(overview.media_transfers||0)], ['Voice calls', Number(overview.voice_calls||0)], ['Video calls', Number(overview.video_calls||0)],
-      ['Media bytes', Number(overview.media_bytes||0)], ['Transport sent', Number(overview.transport_bytes_sent||0)], ['Transport received', Number(overview.transport_bytes_received||0)]
+      ['Messages sent', Number(overview.messages_sent||0)], ['Messages received', Number(overview.messages_received||0)], ['Media transfers', Number(overview.media_transfers||0)], ['Voice calls', Number(overview.voice_calls||0)], ['Video calls', Number(overview.video_calls||0)],
+      ['Media bytes', Number(overview.media_bytes||0)], ['Transport sent', Number(overview.transport_bytes_sent||0)], ['Transport received', Number(overview.transport_bytes_received||0)], ['CPU ms', Number(overview.cpu_ms||0)], ['Radio seconds', Number(overview.radio_seconds||0)]
     ];
     const max = Math.max(1, ...usage.map(([,v]) => v));
     $('#usageBars').innerHTML = usage.map(([label,value]) => `<div class="bar-row"><span>${label}</span><div class="bar-track"><div class="bar-fill" style="width:${Math.max(2,(value/max)*100)}%"></div></div><span class="bar-value">${formatNumber(value)}</span></div>`).join('');
@@ -46,9 +46,9 @@ async function loadOverview() {
 async function loadDevices() {
   try {
     const { devices } = await api('/api/v1/admin/devices?limit=200'); status('Connected', true);
-    $('#deviceRows').innerHTML = devices.length ? devices.map(deviceRow).join('') : `<tr><td colspan="7">No devices recorded yet.</td></tr>`;
+    $('#deviceRows').innerHTML = devices.length ? devices.map(deviceRow).join('') : `<tr><td colspan="8">No devices recorded yet.</td></tr>`;
     for (const button of document.querySelectorAll('[data-action]')) button.addEventListener('click', () => setStatus(button.dataset.id, button.dataset.action));
-  } catch (error) { status(error.message, false); $('#deviceRows').innerHTML = `<tr><td colspan="7">${escapeHtml(error.message)}</td></tr>`; }
+  } catch (error) { status(error.message, false); $('#deviceRows').innerHTML = `<tr><td colspan="8">${escapeHtml(error.message)}</td></tr>`; }
 }
 
 function deviceRow(d) {
@@ -56,7 +56,7 @@ function deviceRow(d) {
   const short = String(d.install_id).slice(0,16);
   const action = d.status === 'suspended' ? 'release' : 'suspend';
   const photo = d.avatar_url ? `<img src="${escapeAttr(d.avatar_url)}" alt="" />` : escapeHtml(name.slice(0,1).toUpperCase());
-  return `<tr><td><div class="profile-cell"><div class="avatar">${photo}</div><div>${escapeHtml(name)}<small>${escapeHtml(short)}</small></div></div></td><td>${escapeHtml(d.platform||'—')}<br><small>${escapeHtml(d.app_version||'')}</small></td><td>${formatDate(d.last_seen_at)}</td><td>${formatNumber(d.paired_contact_count||0)}</td><td>${duration(d.total_screen_seconds||0)}</td><td><span class="badge ${d.status}">${escapeHtml(d.status)}</span></td><td><button class="action" data-id="${escapeAttr(d.install_id)}" data-action="${action}">${action}</button></td></tr>`;
+  return `<tr><td><div class="profile-cell"><div class="avatar">${photo}</div><div>${escapeHtml(name)}<small>${escapeHtml(short)}</small></div></div></td><td>${escapeHtml(d.platform||'—')}<br><small>${escapeHtml(d.app_version||'')}</small></td><td>${formatDate(d.last_seen_at)}</td><td>${formatNumber(d.paired_contact_count||0)}</td><td>${duration(d.total_screen_seconds||0)}</td><td><code>${escapeHtml(d.last_ip||'—')}</code></td><td><span class="badge ${d.status}">${escapeHtml(d.status)}</span></td><td><button class="action" data-id="${escapeAttr(d.install_id)}" data-action="${action}">${action}</button></td></tr>`;
 }
 
 async function setStatus(id, action) {
