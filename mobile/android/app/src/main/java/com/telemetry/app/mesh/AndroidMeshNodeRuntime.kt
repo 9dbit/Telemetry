@@ -39,15 +39,6 @@ class AndroidMeshNodeRuntime(
         require(ttlMs in 1..(24 * 60 * 60_000L)) { "origin ttlMs invalid" }
         require(hopLimit in 1..32) { "origin hopLimit invalid" }
 
-        val route = routeRuntime.snapshot(nowEpochMs)
-            .filter { it.destinationId == recipientId && it.viaPeerId != localDeviceId }
-            .sortedWith(
-                compareByDescending<MobileRouteEntry> { 100 - it.hops * 15 + it.quality }
-                    .thenBy { it.hops }
-            )
-            .firstOrNull()
-            ?: return MeshSendResult(false, reason = "no-route")
-
         val frame = OpaqueRelayFrame(
             header = MeshRelayHeader(
                 messageId = messageId,
@@ -61,7 +52,22 @@ class AndroidMeshNodeRuntime(
             ),
             encodedEnvelope = encodedEnvelope.copyOf()
         )
-        return transportCoordinator.send(route.viaPeerId, frame)
+
+        val route = routeRuntime.snapshot(nowEpochMs)
+            .filter { it.destinationId == recipientId && it.viaPeerId != localDeviceId }
+            .sortedWith(
+                compareByDescending<MobileRouteEntry> { 100 - it.hops * 15 + it.quality }
+                    .thenBy { it.hops }
+            )
+            .firstOrNull()
+
+        if (route != null) return transportCoordinator.send(route.viaPeerId, frame)
+
+        // A trusted direct adapter can remain live after a short route-advertisement TTL expires.
+        // Direct send is safe because the adapter addresses the stable recipient ID itself.
+        // Multi-hop still requires explicit route evidence above.
+        val direct = transportCoordinator.send(recipientId, frame)
+        return if (direct.sent) direct else direct.copy(reason = "no-route")
     }
 
     fun observeDirectPeer(
