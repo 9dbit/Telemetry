@@ -17,10 +17,12 @@ import com.telemetry.app.crypto.DeviceIdentity
 import com.telemetry.app.discovery.DiscoveryEvent
 import com.telemetry.app.discovery.PeerCandidate
 import com.telemetry.app.discovery.TelemetryBleDiscovery
+import com.telemetry.app.media.AndroidOpaqueMediaChunkStore
 import com.telemetry.app.transport.AndroidWifiLocalMeshPort
 import com.telemetry.app.transport.SecureTransportEvent
 import com.telemetry.app.transport.TelemetryGattMeshRelayPort
 import com.telemetry.app.transport.TelemetryGattTransport
+import java.io.File
 import java.security.SecureRandom
 import java.util.UUID
 
@@ -31,6 +33,7 @@ class MeshLabActivity : ComponentActivity() {
     private lateinit var endpoint: AndroidMeshWireEndpoint
     private lateinit var transport: TelemetryGattTransport
     private lateinit var wifiPort: AndroidWifiLocalMeshPort
+    private lateinit var mediaStore: AndroidOpaqueMediaChunkStore
     private var discovery: TelemetryBleDiscovery? = null
 
     private lateinit var statusView: TextView
@@ -58,9 +61,21 @@ class MeshLabActivity : ComponentActivity() {
 
         identity = AndroidIdentityStore(this).getOrCreate()
         trustStore = AndroidTrustStore(this)
-        wifiPort = AndroidWifiLocalMeshPort(this) { wire ->
-            endpoint.ingestRelayWire(wire, System.currentTimeMillis()) != null
-        }
+        mediaStore = AndroidOpaqueMediaChunkStore(File(filesDir, "telemetry-media-relay"))
+        wifiPort = AndroidWifiLocalMeshPort(
+            context = this,
+            onRelayWire = { wire ->
+                endpoint.ingestRelayWire(wire, System.currentTimeMillis()) != null
+            },
+            onMediaChunkWire = { wire ->
+                runCatching {
+                    mediaStore.put(
+                        wire = wire,
+                        expiresAtEpochMs = System.currentTimeMillis() + MEDIA_RELAY_TTL_MS
+                    ).accepted
+                }.getOrDefault(false)
+            }
+        )
         node = AndroidMeshNodeRuntime(
             localDeviceId = identity.deviceId,
             capabilities = listOf("ble", "mesh-relay", wifiPort.localCapability)
@@ -145,7 +160,7 @@ class MeshLabActivity : ComponentActivity() {
         largeProbeButton = button("Send 64 KB Wi-Fi relay probe") { sendRelayProbe(64 * 1024) }.apply { isEnabled = false }
         root.addView(largeProbeButton)
 
-        root.addView(label("Lab rules: route advertisements are signed. Relay probes contain random opaque bytes, never plaintext. BLE frames over 480 bytes are rejected instead of fragmented silently. The 64 KB probe therefore requires Wi-Fi-local."))
+        root.addView(label("Lab rules: route advertisements are signed. Relay probes contain random opaque bytes, never plaintext. BLE frames over 480 bytes are rejected instead of fragmented silently. The 64 KB probe therefore requires Wi-Fi-local. Incoming TMC1 media chunks are persisted only as opaque encrypted wire data."))
 
         return ScrollView(this).apply { addView(root) }
     }
@@ -324,10 +339,16 @@ class MeshLabActivity : ComponentActivity() {
                     else -> "capability verified; waiting for mDNS endpoint"
                 }
             )
+            append("\nOpaque media chunks stored: ")
+            append(mediaStore.records(now).size)
         }
     }
 
     private fun setStatus(value: String) {
         statusView.text = value
+    }
+
+    companion object {
+        private const val MEDIA_RELAY_TTL_MS = 10 * 60_000L
     }
 }
