@@ -62,6 +62,7 @@ class AndroidMediaTransferController(
         private const val TRANSFER_TTL_MS = 7L * 24 * 60 * 60_000
         private const val MESH_FRAME_TTL_MS = 10L * 60_000
         private const val CONTROL_RETRY_MS = 10_000L
+        private const val FINAL_ACK_GRACE_MS = 5L * 60_000
         private const val TICK_MS = 2_000L
     }
 
@@ -83,7 +84,9 @@ class AndroidMediaTransferController(
         val controlMessageId: String,
         val manifest: NativeMediaManifest,
         val expiresAtEpochMs: Long,
-        @Volatile var readyEmitted: Boolean = false
+        @Volatile var readyEmitted: Boolean = false,
+        @Volatile var lastAckAttemptAt: Long = 0L,
+        @Volatile var readyAtEpochMs: Long? = null
     )
 
     private val appContext = context.applicationContext
@@ -320,7 +323,16 @@ class AndroidMediaTransferController(
             attempt(runtime, now)
         }
         incoming.values.toList().forEach { runtime ->
-            if (runtime.expiresAtEpochMs <= now) incoming.remove(runtime.manifest.assetId)
+            if (runtime.expiresAtEpochMs <= now) {
+                incoming.remove(runtime.manifest.assetId)
+                return@forEach
+            }
+            val readyAt = runtime.readyAtEpochMs
+            val withinAckWindow = readyAt == null || now - readyAt <= FINAL_ACK_GRACE_MS
+            if (withinAckWindow && now - runtime.lastAckAttemptAt >= CONTROL_RETRY_MS) {
+                val progress = assembler.progress(runtime.manifest, now)
+                sendAck(runtime, progress, now)
+            }
         }
     }
 
@@ -390,6 +402,7 @@ class AndroidMediaTransferController(
         if (progress.complete && !runtime.readyEmitted) {
             if (assembler.verifyComplete(runtime.manifest, now)) {
                 runtime.readyEmitted = true
+                runtime.readyAtEpochMs = now
                 stateStore.removeIncomingControl(runtime.controlMessageId)
                 onEvent(
                     NativeMediaTransferEvent.IncomingReady(
@@ -406,6 +419,7 @@ class AndroidMediaTransferController(
     }
 
     private fun sendAck(runtime: IncomingRuntime, progress: NativeMediaReceiveProgress, now: Long) {
+        runtime.lastAckAttemptAt = now
         val ack = NativeMediaChunkAck(
             assetId = runtime.manifest.assetId,
             chunkCount = runtime.manifest.chunkCount,
