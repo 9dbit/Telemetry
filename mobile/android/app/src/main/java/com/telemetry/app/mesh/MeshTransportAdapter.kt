@@ -32,6 +32,7 @@ interface MeshTransportAdapter {
 
 private val TRANSPORT_PRIORITY = listOf(
     "wifi-direct",
+    "wifi-local",
     "wifi-aware",
     "ble",
     "internet",
