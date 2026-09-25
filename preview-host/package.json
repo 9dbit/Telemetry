@@ -1,0 +1,12 @@
+{
+  "name": "telemetry-preview-host",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Railway host for Telemetry preview branches",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
