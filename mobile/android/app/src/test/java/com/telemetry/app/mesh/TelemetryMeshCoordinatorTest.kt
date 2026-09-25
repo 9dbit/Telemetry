@@ -8,17 +8,35 @@ import org.junit.Test
 class TelemetryMeshCoordinatorTest {
     private class MutableResolver : MeshRouteResolver {
         var route: MeshRouteEvidence? = null
-        override fun resolve(destinationId: String, excludePeerIds: Set<String>): MeshRouteEvidence? =
+        override fun resolve(
+            destinationId: String,
+            excludePeerIds: Set<String>,
+            nowEpochMs: Long
+        ): MeshRouteEvidence? =
             route?.takeIf { it.destinationId == destinationId && it.viaPeerId !in excludePeerIds }
     }
 
     private class RecordingSender : MeshNeighborSender {
         var accept = true
-        val sent = mutableListOf<Triple<String, OpaqueRelayFrame, String>>()
-        override fun send(nextHopPeerId: String, frame: OpaqueRelayFrame, transport: String): Boolean {
-            if (!accept) return false
-            sent += Triple(nextHopPeerId, frame, transport)
-            return true
+        var transportId = "wifi-direct"
+        val sent = mutableListOf<Pair<String, OpaqueRelayFrame>>()
+
+        override fun send(nextHopPeerId: String, frame: OpaqueRelayFrame): MeshSendResult {
+            sent += nextHopPeerId to frame
+            return if (accept) {
+                MeshSendResult(
+                    sent = true,
+                    transportId = transportId,
+                    attempts = listOf(MeshSendAttempt(transportId, true)),
+                    reason = "selected-transport"
+                )
+            } else {
+                MeshSendResult(
+                    sent = false,
+                    attempts = listOf(MeshSendAttempt(transportId, false)),
+                    reason = "all-transports-failed"
+                )
+            }
         }
     }
 
@@ -52,20 +70,21 @@ class TelemetryMeshCoordinatorTest {
         assertEquals("no-route", first.reason)
         assertEquals(1, store.pending().size)
 
-        resolver.route = MeshRouteEvidence("device-c", "peer-c", 1, 80, "wifi")
+        resolver.route = MeshRouteEvidence("device-c", "peer-c", 1, 80, "ble")
         val flushed = coordinator.flush(2_000L).single()
 
         assertEquals("forwarded", flushed.state)
+        assertEquals("wifi-direct", flushed.transportId)
         assertEquals(0, store.pending().size)
         assertEquals(1, sender.sent.size)
-        val (_, forwarded, transport) = sender.sent.single()
-        assertEquals("wifi", transport)
+        val (_, forwarded) = sender.sent.single()
         assertEquals(original.header.messageId, forwarded.header.messageId)
         assertEquals(original.header.senderId, forwarded.header.senderId)
         assertEquals(original.header.recipientId, forwarded.header.recipientId)
         assertEquals(1, forwarded.header.hopCount)
         assertEquals(listOf("device-a", "device-b"), forwarded.header.relayPath)
         assertArrayEquals(original.encodedEnvelope, forwarded.encodedEnvelope)
+        assertEquals("wifi-direct", events.last { it.type == "forwarded" }.transport)
         assertTrue(events.none { it.toString().contains("plaintext", ignoreCase = true) })
     }
 
@@ -80,21 +99,23 @@ class TelemetryMeshCoordinatorTest {
 
         val first = coordinator.ingest(frame(), 1_000L)
         assertEquals("stored", first.state)
-        assertEquals("next-hop-send-failed", first.reason)
+        assertEquals("all-transports-failed", first.reason)
         assertEquals(1, store.pending().size)
 
         sender.accept = true
+        sender.transportId = "ble"
         val retry = coordinator.flush(2_000L).single()
         assertEquals("forwarded", retry.state)
+        assertEquals("ble", retry.transportId)
         assertEquals(0, store.pending().size)
-        assertEquals(1, sender.sent.size)
+        assertEquals(2, sender.sent.size)
     }
 
     @Test
     fun duplicateRelayFrameIsDroppedEvenAfterOriginalWasForwarded() {
         val store = InMemoryOpaqueRelayStore()
         val resolver = MutableResolver().apply {
-            route = MeshRouteEvidence("device-c", "peer-c", 1, 70, "wifi")
+            route = MeshRouteEvidence("device-c", "peer-c", 1, 70, "wifi-direct")
         }
         val sender = RecordingSender()
         val coordinator = TelemetryMeshCoordinator("device-b", store, resolver, sender)
