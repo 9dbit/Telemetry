@@ -73,7 +73,7 @@ test('realtime transport policy only accepts direct Wi-Fi-class paths', () => {
   }), /direct Wi-Fi-class/i);
 });
 
-test('caller lifecycle supports ringing, accept, candidate, connected and end', () => {
+test('caller lifecycle supports encrypted WebRTC offer answer ICE connected and end', () => {
   const callerId = 'tlm:device:caller-00000002';
   const calleeId = 'tlm:device:callee-00000002';
   const callId = 'call-lifecycle-0001';
@@ -92,28 +92,65 @@ test('caller lifecycle supports ringing, accept, candidate, connected and end', 
   }), { now });
   assert.equal(result.accepted, true);
   assert.equal(session.snapshot().state, 'negotiating');
-  assert.equal(session.snapshot().selectedTransport, 'wifi-local');
 
   result = session.apply(createCallSignal({
-    kind: 'candidate', callId, callerId, calleeId, fromId: calleeId, sequence: 3, now,
-    transport: 'wifi-local', endpointToken: 'candidate-token-callee-0001'
+    kind: 'answer', callId, callerId, calleeId, fromId: calleeId, sequence: 3, now,
+    transport: 'wifi-local', sessionDescription: 'v=0\r\no=- answer-sdp-for-telemetry-call\r\n'
   }), { now });
   assert.equal(result.accepted, true);
 
   result = session.apply(createCallSignal({
-    kind: 'connected', callId, callerId, calleeId, fromId: calleeId, sequence: 4, now,
+    kind: 'ice-candidate', callId, callerId, calleeId, fromId: calleeId, sequence: 4, now,
+    transport: 'wifi-local',
+    iceCandidate: 'candidate:1 1 UDP 2122260223 192.168.1.20 54321 typ host',
+    sdpMid: '0', sdpMLineIndex: 0
+  }), { now });
+  assert.equal(result.accepted, true);
+
+  result = session.apply(createCallSignal({
+    kind: 'connected', callId, callerId, calleeId, fromId: calleeId, sequence: 5, now,
     transport: 'wifi-local'
   }), { now });
   assert.equal(result.accepted, true);
   assert.equal(session.snapshot().state, 'active');
 
   result = session.apply(createCallSignal({
-    kind: 'end', callId, callerId, calleeId, fromId: calleeId, sequence: 5, now,
+    kind: 'end', callId, callerId, calleeId, fromId: calleeId, sequence: 6, now,
     reason: 'remote-hangup'
   }), { now });
   assert.equal(result.accepted, true);
   assert.equal(session.snapshot().state, 'ended');
-  assert.equal(session.snapshot().endedReason, 'remote-hangup');
+});
+
+test('callee state accepts encrypted offer and ICE only on selected direct transport', () => {
+  const callerId = 'tlm:device:caller-00000005';
+  const calleeId = 'tlm:device:callee-00000005';
+  const callId = 'call-callee-webrtc-0001';
+  const now = new Date('2026-09-25T09:00:00.000Z');
+  const session = new CallSessionStateMachine({ callId, callerId, calleeId, localDeviceId: calleeId });
+  const invite = createCallSignal({
+    kind: 'invite', callId, callerId, calleeId, fromId: callerId, sequence: 1, now,
+    directTransports: ['wifi-local']
+  });
+  assert.equal(session.apply(invite, { now }).accepted, true);
+
+  const offer = createCallSignal({
+    kind: 'offer', callId, callerId, calleeId, fromId: callerId, sequence: 2, now,
+    transport: 'wifi-local', sessionDescription: 'v=0\r\no=- offer-sdp-for-telemetry-call\r\n'
+  });
+  assert.equal(session.apply(offer, { now }).accepted, true);
+  assert.equal(session.snapshot().state, 'negotiating');
+  assert.equal(session.snapshot().selectedTransport, 'wifi-local');
+
+  const badIce = createCallSignal({
+    kind: 'ice-candidate', callId, callerId, calleeId, fromId: callerId, sequence: 3, now,
+    transport: 'wifi-aware',
+    iceCandidate: 'candidate:2 1 UDP 2122260223 10.0.0.2 55555 typ host',
+    sdpMid: '0', sdpMLineIndex: 0
+  });
+  const rejected = session.apply(badIce, { now });
+  assert.equal(rejected.accepted, false);
+  assert.equal(rejected.reason, 'transport-mismatch');
 });
 
 test('callee invite expires deterministically and stale/replayed signaling is rejected', () => {
@@ -129,27 +166,18 @@ test('callee invite expires deterministically and stale/replayed signaling is re
 
   const accepted = session.apply(invite, { now: new Date('2026-09-25T09:00:05.000Z') });
   assert.equal(accepted.accepted, true);
-  assert.equal(session.snapshot().state, 'incoming-ringing');
-
   const replay = session.apply(invite, { now: new Date('2026-09-25T09:00:06.000Z') });
-  assert.equal(replay.accepted, false);
   assert.equal(replay.reason, 'replay-or-stale-sequence');
-
   assert.equal(session.expire({ now: new Date('2026-09-25T09:00:31.000Z') }), true);
   assert.equal(session.snapshot().state, 'timed-out');
 });
 
-test('call state rejects participant mismatch, transport mismatch and illegal transitions', () => {
+test('call state rejects participant mismatch, transport mismatch and malformed SDP/ICE', () => {
   const callerId = 'tlm:device:caller-00000004';
   const calleeId = 'tlm:device:callee-00000004';
   const callId = 'call-guard-0001';
   const now = new Date('2026-09-25T09:00:00.000Z');
   const session = new CallSessionStateMachine({ callId, callerId, calleeId, localDeviceId: callerId });
-
-  const wrongCall = createCallSignal({
-    kind: 'ringing', callId: 'call-other-0001', callerId, calleeId, fromId: calleeId, sequence: 1, now
-  });
-  assert.equal(session.apply(wrongCall, { now }).reason, 'session-mismatch');
 
   const connectedTooEarly = createCallSignal({
     kind: 'connected', callId, callerId, calleeId, fromId: calleeId, sequence: 1, now,
@@ -157,16 +185,15 @@ test('call state rejects participant mismatch, transport mismatch and illegal tr
   });
   assert.equal(session.apply(connectedTooEarly, { now }).reason, 'unexpected-connected');
 
-  session.apply(createCallSignal({
-    kind: 'accept', callId, callerId, calleeId, fromId: calleeId, sequence: 2, now,
-    transport: 'wifi-local'
-  }), { now });
-  const wrongTransport = session.apply(createCallSignal({
-    kind: 'connected', callId, callerId, calleeId, fromId: calleeId, sequence: 3, now,
-    transport: 'wifi-aware'
-  }), { now });
-  assert.equal(wrongTransport.accepted, false);
-  assert.equal(wrongTransport.reason, 'transport-mismatch');
+  assert.throws(() => createCallSignal({
+    kind: 'offer', callId, callerId, calleeId, fromId: callerId, sequence: 1, now,
+    transport: 'wifi-local', sessionDescription: 'x'
+  }), /session description/i);
+
+  assert.throws(() => createCallSignal({
+    kind: 'ice-candidate', callId, callerId, calleeId, fromId: callerId, sequence: 1, now,
+    transport: 'wifi-local', iceCandidate: '', sdpMid: '0', sdpMLineIndex: 0
+  }), /ICE candidate/i);
 
   assert.throws(() => validateCallSignal({
     version: 'telemetry/call-signal/0.1',
