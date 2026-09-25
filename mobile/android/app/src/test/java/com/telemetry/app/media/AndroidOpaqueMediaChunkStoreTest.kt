@@ -40,6 +40,28 @@ class AndroidOpaqueMediaChunkStoreTest {
     }
 
     @Test
+    fun sameAssetAndIndexWithDifferentCiphertextIsConflict() {
+        val root = Files.createTempDirectory("telemetry-media-store").toFile()
+        try {
+            val store = AndroidOpaqueMediaChunkStore(root)
+            val original = chunk(assetId = "asset-conflict-0001", index = 0, count = 1)
+            val conflicting = original.copy(
+                nonce = ByteArray(12) { (100 + it).toByte() },
+                ciphertext = byteArrayOf(9, 8, 7, 6),
+                tag = ByteArray(16) { (80 + it).toByte() }
+            )
+            val originalWire = AndroidMediaChunkWireCodec.encode(original)
+            assertTrue(store.put(originalWire, 10_000L).accepted)
+            val result = store.put(AndroidMediaChunkWireCodec.encode(conflicting), 10_000L)
+            assertFalse(result.accepted)
+            assertEquals("conflict", result.reason)
+            assertArrayEquals(originalWire, store.records(1_000L).single().wire)
+        } finally {
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
     fun reportsMissingIndicesAndRemovesStoredChunk() {
         val root = Files.createTempDirectory("telemetry-media-store").toFile()
         try {
