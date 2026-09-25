@@ -1,0 +1,151 @@
+name: Android Preview Release
+
+permissions:
+  contents: write
+
+on:
+  pull_request:
+    paths:
+      - "mobile/android/**"
+      - ".github/workflows/android-release.yml"
+      - "update-controller/**"
+  workflow_dispatch:
+    inputs:
+      release_notes:
+        description: "Release notes shown inside Telemetry"
+        required: true
+        type: string
+      mandatory:
+        description: "Mark this update as mandatory when online"
+        required: true
+        default: false
+        type: boolean
+      minimum_version_code:
+        description: "Minimum supported Android versionCode (0 = no minimum)"
+        required: true
+        default: "0"
+        type: string
+
+jobs:
+  build-release-candidate:
+    runs-on: ubuntu-latest
+    env:
+      CHANNEL: preview
+      PACKAGE_NAME: com.telemetry.preview
+      RELEASE_NOTES: ${{ inputs.release_notes || 'CI candidate validation only' }}
+      MANDATORY: ${{ inputs.mandatory || false }}
+      MINIMUM_VERSION_CODE: ${{ inputs.minimum_version_code || '0' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "9.6.0"
+
+      - name: Compute immutable release version
+        shell: bash
+        run: |
+          set -euo pipefail
+          DAYS_SINCE_EPOCH=$(( $(date -u +%s) / 86400 ))
+          VERSION_CODE=$(( DAYS_SINCE_EPOCH * 1000 + GITHUB_RUN_NUMBER % 1000 ))
+          VERSION_NAME="0.9.0-preview.${GITHUB_RUN_NUMBER}"
+          echo "TELEMETRY_VERSION_CODE=${VERSION_CODE}" >> "$GITHUB_ENV"
+          echo "TELEMETRY_VERSION_NAME=${VERSION_NAME}" >> "$GITHUB_ENV"
+          echo "RELEASE_TAG=android-preview-${VERSION_CODE}" >> "$GITHUB_ENV"
+
+      - name: Test and build signed preview APK
+        run: gradle -p mobile/android :app:testDebugUnitTest :app:assembleDebug --stacktrace
+
+      - name: Verify APK identity and generate release manifest
+        shell: bash
+        run: |
+          set -euo pipefail
+          APK_SRC="mobile/android/app/build/outputs/apk/debug/app-debug.apk"
+          APK_OUT="Telemetry-Android-Preview.apk"
+          cp "$APK_SRC" "$APK_OUT"
+
+          APKSIGNER="$(find "$ANDROID_HOME/build-tools" -type f -name apksigner | sort -V | tail -n 1)"
+          test -x "$APKSIGNER"
+          "$APKSIGNER" verify --verbose --print-certs "$APK_OUT" 2>&1 | tee apk-signature.txt
+          CERT_SHA256="$(sed -nE 's/^.*Signer: certificate SHA-256 digest: ([0-9a-fA-F]{64})$/\1/p' apk-signature.txt | head -n 1 | tr '[:lower:]' '[:upper:]')"
+          if ! [[ "$CERT_SHA256" =~ ^[A-F0-9]{64}$ ]]; then
+            echo "Could not extract a valid APK signing certificate SHA-256 fingerprint" >&2
+            cat apk-signature.txt >&2
+            exit 1
+          fi
+          echo "APK signing certificate SHA-256: ${CERT_SHA256}"
+
+          SHA256="$(sha256sum "$APK_OUT" | awk '{print $1}')"
+          SIZE_BYTES="$(stat -c%s "$APK_OUT")"
+          PUBLISHED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          APK_URL="https://github.com/${GITHUB_REPOSITORY}/releases/download/${RELEASE_TAG}/${APK_OUT}"
+          export CERT_SHA256 SHA256 SIZE_BYTES PUBLISHED_AT APK_URL
+
+          python3 - <<'PY'
+          import json, os
+          minimum = int(os.environ['MINIMUM_VERSION_CODE'])
+          if minimum < 0:
+              raise SystemExit('minimum_version_code must be >= 0')
+          manifest = {
+              'schemaVersion': 1,
+              'channel': os.environ['CHANNEL'],
+              'versionName': os.environ['TELEMETRY_VERSION_NAME'],
+              'versionCode': int(os.environ['TELEMETRY_VERSION_CODE']),
+              'minimumVersionCode': minimum,
+              'mandatory': os.environ['MANDATORY'].lower() == 'true',
+              'publishedAt': os.environ['PUBLISHED_AT'],
+              'releaseNotes': os.environ['RELEASE_NOTES'],
+              'apkUrl': os.environ['APK_URL'],
+              'sha256': os.environ['SHA256'],
+              'sizeBytes': int(os.environ['SIZE_BYTES']),
+              'packageName': os.environ['PACKAGE_NAME'],
+              'signingCertificateSha256': os.environ['CERT_SHA256'],
+              'releaseTag': os.environ['RELEASE_TAG'],
+              'sourceCommit': os.environ['GITHUB_SHA'],
+          }
+          with open('telemetry-android-preview-manifest.json', 'w', encoding='utf-8') as f:
+              json.dump(manifest, f, indent=2, sort_keys=True)
+              f.write('\n')
+          PY
+
+      - name: Publish explicitly promoted preview release
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          TITLE="Telemetry Android Preview ${TELEMETRY_VERSION_NAME}"
+          NOTES=$(cat <<TXT
+          ${RELEASE_NOTES}
+
+          Version-Code: ${TELEMETRY_VERSION_CODE}
+          Version-Name: ${TELEMETRY_VERSION_NAME}
+          Channel: preview
+          Source-Commit: ${GITHUB_SHA}
+
+          This release was explicitly promoted through the manual Android Preview Release workflow.
+          TXT
+          )
+          gh release create "$RELEASE_TAG" \
+            "Telemetry-Android-Preview.apk#Telemetry-Android-Preview.apk" \
+            "telemetry-android-preview-manifest.json#telemetry-android-preview-manifest.json" \
+            --title "$TITLE" \
+            --notes "$NOTES" \
+            --latest
+
+      - name: Upload auditable candidate evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: telemetry-android-release-candidate-${{ env.TELEMETRY_VERSION_CODE }}
+          path: |
+            Telemetry-Android-Preview.apk
+            telemetry-android-preview-manifest.json
+            apk-signature.txt
+          if-no-files-found: error
+          retention-days: 30

@@ -1,6 +1,7 @@
 package com.telemetry.app
 
 import android.Manifest
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
@@ -62,6 +63,7 @@ import com.telemetry.app.media.AndroidMediaAppRuntime
 import com.telemetry.app.media.NativeMediaTransferEvent
 import com.telemetry.app.transport.SecureTransportEvent
 import com.telemetry.app.transport.TelemetryGattTransport
+import com.telemetry.app.update.UpdateGateActivity
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -158,6 +160,7 @@ class MainActivity : ComponentActivity() {
                     onNearby = ::openNearby,
                     onNetwork = { screen = AppScreen.NETWORK },
                     onSettings = { screen = AppScreen.SETTINGS },
+                    onCheckUpdate = ::openUpdateGate,
                     onSos = { screen = AppScreen.SOS },
                     onStopDiscovery = ::stopDiscovery,
                     onScanAgain = ::ensurePermissionsAndStart,
@@ -183,6 +186,12 @@ class MainActivity : ComponentActivity() {
         mediaRuntime?.stop()
         transport?.stop()
         super.onDestroy()
+    }
+
+    private fun openUpdateGate() {
+        startActivity(Intent(this, UpdateGateActivity::class.java).apply {
+            action = "com.telemetry.preview.CHECK_UPDATE"
+        })
     }
 
     private fun openNearby() {
@@ -473,6 +482,7 @@ private fun TelemetryAppV2(
     onNearby: () -> Unit,
     onNetwork: () -> Unit,
     onSettings: () -> Unit,
+    onCheckUpdate: () -> Unit,
     onSos: () -> Unit,
     onStopDiscovery: () -> Unit,
     onScanAgain: () -> Unit,
@@ -546,7 +556,8 @@ private fun TelemetryAppV2(
                 onMessages = onMessages,
                 onNearby = onNearby,
                 onNetwork = onNetwork,
-                onSettings = onSettings
+                onSettings = onSettings,
+                onCheckUpdate = onCheckUpdate
             )
             AppScreen.SOS -> SosScreen(
                 state = state,
@@ -1189,7 +1200,8 @@ private fun SettingsScreen(
     onMessages: () -> Unit,
     onNearby: () -> Unit,
     onNetwork: () -> Unit,
-    onSettings: () -> Unit
+    onSettings: () -> Unit,
+    onCheckUpdate: () -> Unit
 ) {
     Scaffold(
         containerColor = Color.Transparent,
@@ -1239,7 +1251,13 @@ private fun SettingsScreen(
             Spacer(Modifier.height(10.dp))
             SettingCard(
                 "Build",
-                "Telemetry Android 0.4.0 · UI v2"
+                "Telemetry Android ${BuildConfig.VERSION_NAME} · Preview channel"
+            )
+            Spacer(Modifier.height(10.dp))
+            PrimaryButton(
+                "Check for Update",
+                onCheckUpdate,
+                Modifier.fillMaxWidth()
             )
         }
     }
