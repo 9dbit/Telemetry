@@ -35,6 +35,7 @@ jobs:
           rm -f .github/workflows/sync-ios-final.yml
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add mobile/ios-preview/App.tsx mobile/ios-preview/modules/telemetry-ios-native/ios/cleng.wav .github/workflows/sync-ios-final.yml
+          git add mobile/ios-preview/App.tsx .github/workflows/sync-ios-final.yml
+          git add -f mobile/ios-preview/modules/telemetry-ios-native/ios/cleng.wav
           git commit -m "feat(ios): refresh navigation chat UI and notification sound"
           git push origin HEAD:feature/ios-m1.5-media-runtime
