@@ -13,6 +13,7 @@ data class MeshRelayHeader(
     val hopCount: Int,
     val hopLimit: Int,
     val relayPath: List<String>,
+    val createdAtEpochMs: Long = 0L,
     val expiresAtEpochMs: Long
 ) {
     init {
@@ -21,6 +22,8 @@ data class MeshRelayHeader(
         require(recipientId.isNotBlank()) { "recipientId is required" }
         require(hopLimit in 1..32) { "hopLimit must be between 1 and 32" }
         require(hopCount in 0..hopLimit) { "hopCount must be between 0 and hopLimit" }
+        require(createdAtEpochMs >= 0L) { "createdAtEpochMs must be non-negative" }
+        require(expiresAtEpochMs > createdAtEpochMs) { "expiresAtEpochMs must be after createdAtEpochMs" }
     }
 
     fun advancedBy(relayDeviceId: String): MeshRelayHeader {
