@@ -35,7 +35,8 @@ class TelemetryMeshCoordinator(
     private val relayStore: TelemetryMeshBridge,
     private val routeResolver: MeshRouteResolver,
     private val neighborSender: MeshNeighborSender,
-    private val onEvent: (MeshCoordinatorEvent) -> Unit = {}
+    private val onEvent: (MeshCoordinatorEvent) -> Unit = {},
+    private val onLocalDelivery: (OpaqueRelayFrame) -> Unit = {}
 ) {
     init {
         require(localDeviceId.isNotBlank()) { "localDeviceId is required" }
@@ -44,6 +45,7 @@ class TelemetryMeshCoordinator(
     fun ingest(frame: OpaqueRelayFrame, nowEpochMs: Long): MeshCoordinatorResult {
         val decision = relayStore.ingest(frame, localDeviceId, nowEpochMs)
         if (decision.action == MeshIngressAction.DELIVER_LOCAL) {
+            onLocalDelivery(frame)
             emit("deliver-local", frame, reason = decision.reason)
             return MeshCoordinatorResult(frame.header.messageId, "deliver-local", decision.reason)
         }

@@ -3,6 +3,7 @@ package com.telemetry.app.mesh
 class AndroidMeshNodeRuntime(
     val localDeviceId: String,
     capabilities: List<String> = listOf("ble", "mesh-relay"),
+    onLocalDelivery: (OpaqueRelayFrame) -> Unit = {},
     onEvent: (MeshCoordinatorEvent) -> Unit = {}
 ) {
     private val routeRuntime = RouteAdvertisementRuntime(localDeviceId, capabilities)
@@ -13,7 +14,8 @@ class AndroidMeshNodeRuntime(
         relayStore = relayStore,
         routeResolver = RouteRuntimeResolver(routeRuntime),
         neighborSender = TransportCoordinatorNeighborSender(transportCoordinator),
-        onEvent = onEvent
+        onEvent = onEvent,
+        onLocalDelivery = onLocalDelivery
     )
 
     fun registerTransport(adapter: MeshTransportAdapter) {
@@ -22,6 +24,51 @@ class AndroidMeshNodeRuntime(
 
     fun sendOpaqueToNextHop(peerId: String, frame: OpaqueRelayFrame): MeshSendResult =
         transportCoordinator.send(peerId, frame)
+
+    fun sendOriginEnvelope(
+        recipientId: String,
+        messageId: String,
+        encodedEnvelope: ByteArray,
+        nowEpochMs: Long = System.currentTimeMillis(),
+        ttlMs: Long = 10 * 60_000L,
+        hopLimit: Int = 8
+    ): MeshSendResult {
+        require(recipientId.isNotBlank()) { "recipientId is required" }
+        require(messageId.isNotBlank()) { "messageId is required" }
+        require(encodedEnvelope.isNotEmpty()) { "encodedEnvelope is required" }
+        require(ttlMs in 1..(24 * 60 * 60_000L)) { "origin ttlMs invalid" }
+        require(hopLimit in 1..32) { "origin hopLimit invalid" }
+
+        val frame = OpaqueRelayFrame(
+            header = MeshRelayHeader(
+                messageId = messageId,
+                senderId = localDeviceId,
+                recipientId = recipientId,
+                hopCount = 0,
+                hopLimit = hopLimit,
+                relayPath = listOf(localDeviceId),
+                createdAtEpochMs = nowEpochMs,
+                expiresAtEpochMs = nowEpochMs + ttlMs
+            ),
+            encodedEnvelope = encodedEnvelope.copyOf()
+        )
+
+        val route = routeRuntime.snapshot(nowEpochMs)
+            .filter { it.destinationId == recipientId && it.viaPeerId != localDeviceId }
+            .sortedWith(
+                compareByDescending<MobileRouteEntry> { 100 - it.hops * 15 + it.quality }
+                    .thenBy { it.hops }
+            )
+            .firstOrNull()
+
+        if (route != null) return transportCoordinator.send(route.viaPeerId, frame)
+
+        // A trusted direct adapter can remain live after a short route-advertisement TTL expires.
+        // Direct send is safe because the adapter addresses the stable recipient ID itself.
+        // Multi-hop still requires explicit route evidence above.
+        val direct = transportCoordinator.send(recipientId, frame)
+        return if (direct.sent) direct else direct.copy(reason = "no-route")
+    }
 
     fun observeDirectPeer(
         peerId: String,

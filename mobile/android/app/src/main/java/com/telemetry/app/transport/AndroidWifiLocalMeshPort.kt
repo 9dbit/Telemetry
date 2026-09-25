@@ -19,7 +19,8 @@ import java.util.concurrent.atomic.AtomicBoolean
 
 class AndroidWifiLocalMeshPort(
     context: Context,
-    private val onRelayWire: (ByteArray) -> Boolean
+    private val onRelayWire: (ByteArray) -> Boolean,
+    private val onMediaChunkWire: (ByteArray) -> Boolean = { false }
 ) : WifiLocalMeshRelayPort {
     companion object {
         const val SERVICE_TYPE = "_telemetry._tcp."
@@ -27,6 +28,7 @@ class AndroidWifiLocalMeshPort(
         private const val SERVICE_PREFIX = "tlm-"
         private const val PACKET_MAGIC = 0x544c5731 // TLW1
         private const val PACKET_KIND_RELAY = 1
+        private const val PACKET_KIND_MEDIA_CHUNK = 2
         private const val CONNECT_TIMEOUT_MS = 1_500
         private const val SOCKET_TIMEOUT_MS = 3_000
     }
@@ -143,7 +145,13 @@ class AndroidWifiLocalMeshPort(
         )
     }
 
-    override fun sendRelayWire(peerId: String, bytes: ByteArray): Boolean {
+    override fun sendRelayWire(peerId: String, bytes: ByteArray): Boolean =
+        sendPacket(peerId, PACKET_KIND_RELAY, bytes)
+
+    fun sendMediaChunkWire(peerId: String, bytes: ByteArray): Boolean =
+        sendPacket(peerId, PACKET_KIND_MEDIA_CHUNK, bytes)
+
+    private fun sendPacket(peerId: String, kind: Int, bytes: ByteArray): Boolean {
         if (bytes.isEmpty() || bytes.size > MAX_WIRE_BYTES) return false
         val binding = bindings[peerId] ?: return false
         val service = resolved[binding.serviceId] ?: return false
@@ -153,7 +161,7 @@ class AndroidWifiLocalMeshPort(
                 socket.connect(InetSocketAddress(service.host, service.port), CONNECT_TIMEOUT_MS)
                 val out = DataOutputStream(socket.getOutputStream().buffered())
                 out.writeInt(PACKET_MAGIC)
-                out.writeByte(PACKET_KIND_RELAY)
+                out.writeByte(kind)
                 val auth = binding.authToken.toByteArray(Charsets.US_ASCII)
                 out.writeByte(auth.size)
                 out.write(auth)
@@ -178,7 +186,8 @@ class AndroidWifiLocalMeshPort(
                 socket.soTimeout = SOCKET_TIMEOUT_MS
                 val input = DataInputStream(socket.getInputStream().buffered())
                 require(input.readInt() == PACKET_MAGIC) { "invalid wifi-local packet magic" }
-                require(input.readUnsignedByte() == PACKET_KIND_RELAY) { "unsupported wifi-local packet kind" }
+                val kind = input.readUnsignedByte()
+                require(kind == PACKET_KIND_RELAY || kind == PACKET_KIND_MEDIA_CHUNK) { "unsupported wifi-local packet kind" }
                 val authLength = input.readUnsignedByte()
                 require(authLength in 1..64) { "invalid wifi-local auth length" }
                 val auth = ByteArray(authLength).also(input::readFully)
@@ -188,7 +197,11 @@ class AndroidWifiLocalMeshPort(
                 val payloadLength = input.readInt()
                 require(payloadLength in 1..MAX_WIRE_BYTES) { "invalid wifi-local payload length" }
                 val payload = ByteArray(payloadLength).also(input::readFully)
-                val accepted = onRelayWire(payload)
+                val accepted = when (kind) {
+                    PACKET_KIND_RELAY -> onRelayWire(payload)
+                    PACKET_KIND_MEDIA_CHUNK -> onMediaChunkWire(payload)
+                    else -> false
+                }
                 socket.getOutputStream().write(if (accepted) 1 else 0)
                 socket.getOutputStream().flush()
             }.onFailure {

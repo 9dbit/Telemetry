@@ -91,15 +91,18 @@ class InMemoryOpaqueRelayStore : TelemetryMeshBridge {
         if (localDeviceId in frame.header.relayPath) {
             return MeshIngressDecision(MeshIngressAction.DROP, "relay-loop")
         }
+
+        val seenExpiry = seenUntil[frame.header.messageId]
+        if (stored.containsKey(frame.header.messageId) || (seenExpiry != null && seenExpiry > nowEpochMs)) {
+            return MeshIngressDecision(MeshIngressAction.DROP, "duplicate")
+        }
+
         if (frame.header.recipientId == localDeviceId) {
+            seenUntil[frame.header.messageId] = frame.header.expiresAtEpochMs
             return MeshIngressDecision(MeshIngressAction.DELIVER_LOCAL, "recipient-local")
         }
         if (frame.header.hopCount >= frame.header.hopLimit) {
             return MeshIngressDecision(MeshIngressAction.DROP, "hop-limit")
-        }
-        val seenExpiry = seenUntil[frame.header.messageId]
-        if (stored.containsKey(frame.header.messageId) || (seenExpiry != null && seenExpiry > nowEpochMs)) {
-            return MeshIngressDecision(MeshIngressAction.DROP, "duplicate")
         }
         return MeshIngressDecision(MeshIngressAction.RELAY, "relay-eligible")
     }

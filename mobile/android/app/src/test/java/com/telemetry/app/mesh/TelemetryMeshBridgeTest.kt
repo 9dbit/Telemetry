@@ -53,17 +53,19 @@ class TelemetryMeshBridgeTest {
 
         assertEquals(
             MeshIngressAction.DELIVER_LOCAL,
-            bridge.ingest(frame(recipientId = "device-b"), "device-b", 1_000L).action
-        )
-        assertEquals(
-            MeshIngressAction.RELAY,
-            bridge.ingest(frame(), "device-b", 1_000L).action
+            bridge.ingest(frame(messageId = "local", recipientId = "device-b"), "device-b", 1_000L).action
         )
 
-        bridge.store(frame())
+        val relay = frame(messageId = "relay")
+        assertEquals(
+            MeshIngressAction.RELAY,
+            bridge.ingest(relay, "device-b", 1_000L).action
+        )
+
+        bridge.store(relay)
         assertEquals(
             "duplicate",
-            bridge.ingest(frame(), "device-b", 1_000L).reason
+            bridge.ingest(relay, "device-b", 1_000L).reason
         )
         assertEquals(
             "expired",

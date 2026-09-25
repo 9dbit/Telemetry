@@ -58,6 +58,8 @@ import com.telemetry.app.crypto.DeviceIdentity
 import com.telemetry.app.discovery.DiscoveryEvent
 import com.telemetry.app.discovery.PeerCandidate
 import com.telemetry.app.discovery.TelemetryBleDiscovery
+import com.telemetry.app.media.AndroidMediaAppRuntime
+import com.telemetry.app.media.NativeMediaTransferEvent
 import com.telemetry.app.transport.SecureTransportEvent
 import com.telemetry.app.transport.TelemetryGattTransport
 import java.text.SimpleDateFormat
@@ -100,6 +102,7 @@ class MainActivity : ComponentActivity() {
     private lateinit var trustStore: AndroidTrustStore
     private var discovery: TelemetryBleDiscovery? = null
     private var transport: TelemetryGattTransport? = null
+    private var mediaRuntime: AndroidMediaAppRuntime? = null
     private var uiState by mutableStateOf(M1BUiState())
     private var screen by mutableStateOf(AppScreen.MESSAGES)
 
@@ -114,14 +117,37 @@ class MainActivity : ComponentActivity() {
         )
     }
 
+    private val mediaPicker = registerForActivityResult(
+        ActivityResultContracts.OpenDocument()
+    ) { uri ->
+        val peerId = uiState.trustedDeviceId
+        if (uri != null && peerId != null) {
+            uiState = uiState.copy(mediaStatus = "Preparing encrypted attachment…")
+            mediaRuntime?.queueUri(
+                uri = uri,
+                peerId = peerId,
+                conversationId = "chat:$peerId"
+            )
+        }
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         identity = AndroidIdentityStore(this).getOrCreate()
         trustStore = AndroidTrustStore(this)
         uiState = uiState.copy(localDeviceId = identity.deviceId)
-        transport = TelemetryGattTransport(this, identity, trustStore) { event ->
+        val activeTransport = TelemetryGattTransport(this, identity, trustStore) { event ->
             runOnUiThread { reduceSecure(event) }
         }
+        transport = activeTransport
+        mediaRuntime = AndroidMediaAppRuntime(
+            context = this,
+            identity = identity,
+            trustStore = trustStore,
+            gattTransport = activeTransport
+        ) { event ->
+            runOnUiThread { reduceMedia(event) }
+        }.also { it.start() }
 
         setContent {
             MaterialTheme(colorScheme = TelemetryScheme) {
@@ -140,6 +166,7 @@ class MainActivity : ComponentActivity() {
                     onOpenChat = { if (uiState.connectedAddress != null) screen = AppScreen.CHAT },
                     onDraft = { uiState = uiState.copy(draft = it) },
                     onSend = ::sendDraft,
+                    onAttach = ::pickMedia,
                     onNearbyQuery = { uiState = uiState.copy(nearbyQuery = it) },
                     onStrongOnly = { uiState = uiState.copy(strongOnly = it) },
                     onToggleDiagnostics = {
@@ -153,6 +180,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onDestroy() {
         discovery?.stop()
+        mediaRuntime?.stop()
         transport?.stop()
         super.onDestroy()
     }
@@ -208,6 +236,21 @@ class MainActivity : ComponentActivity() {
         if (transport?.trustPeer(deviceId) == true) {
             uiState = uiState.copy(status = "Trust confirmed · establishing encrypted channel…")
         }
+    }
+
+    private fun pickMedia() {
+        if (uiState.trustedDeviceId == null) {
+            uiState = uiState.copy(mediaStatus = "Connect to a trusted peer before sending media.")
+            return
+        }
+        mediaPicker.launch(
+            arrayOf(
+                "image/*",
+                "video/*",
+                "application/pdf",
+                "application/octet-stream"
+            )
+        )
     }
 
     private fun sendDraft() {
@@ -304,6 +347,7 @@ class MainActivity : ComponentActivity() {
                 )
             }
             is SecureTransportEvent.SessionTrusted -> {
+                mediaRuntime?.observeTrustedPeer(event.deviceId)
                 screen = AppScreen.CHAT
                 uiState.copy(
                     status = "Offline · Encrypted",
@@ -330,11 +374,61 @@ class MainActivity : ComponentActivity() {
                 status = "✓ Delivered · signed receipt verified",
                 messages = markLatestOutgoingDelivered(uiState.messages)
             )
-            is SecureTransportEvent.Disconnected -> uiState.copy(
-                status = "Peer disconnected · message queue remains local",
-                connectedAddress = uiState.connectedAddress.takeUnless { it == event.address }
-            )
+            is SecureTransportEvent.Disconnected -> {
+                uiState.trustedDeviceId?.let { mediaRuntime?.peerUnavailable(it) }
+                uiState.copy(
+                    status = "Peer disconnected · message queue remains local",
+                    connectedAddress = uiState.connectedAddress.takeUnless { it == event.address }
+                )
+            }
             is SecureTransportEvent.Error -> uiState.copy(status = event.message)
+        }
+    }
+
+    private fun reduceMedia(event: NativeMediaTransferEvent) {
+        uiState = when (event) {
+            is NativeMediaTransferEvent.Preparing -> uiState.copy(
+                mediaStatus = "Encrypting ${event.displayName}…"
+            )
+            is NativeMediaTransferEvent.OutgoingQueued -> uiState.copy(
+                mediaStatus = "Queued ${event.fileName} · ${event.totalChunks} encrypted chunk(s)"
+            )
+            is NativeMediaTransferEvent.OutgoingProgress -> uiState.copy(
+                mediaStatus = buildString {
+                    append("Sending encrypted attachment · ")
+                    append(event.acknowledgedChunks)
+                    append('/')
+                    append(event.totalChunks)
+                    event.transport?.let { append(" · ").append(it) }
+                }
+            )
+            is NativeMediaTransferEvent.OutgoingComplete -> uiState.copy(
+                mediaStatus = "Attachment delivered and verified",
+                messages = uiState.messages + ChatMessage(
+                    text = "📎 ${event.fileName}",
+                    outgoing = true,
+                    time = nowLabel(),
+                    delivered = true
+                )
+            )
+            is NativeMediaTransferEvent.IncomingProgress -> uiState.copy(
+                mediaStatus = "Receiving ${event.fileName} · ${event.receivedChunks}/${event.totalChunks}"
+            )
+            is NativeMediaTransferEvent.IncomingReady -> {
+                mediaRuntime?.materializeIncomingToCache(event.assetId)
+                uiState.copy(
+                    mediaStatus = "Received attachment verified",
+                    messages = uiState.messages + ChatMessage(
+                        text = "📎 ${event.fileName}",
+                        outgoing = false,
+                        time = nowLabel(),
+                        delivered = true
+                    )
+                )
+            }
+            is NativeMediaTransferEvent.Error -> uiState.copy(
+                mediaStatus = event.message
+            )
         }
     }
 
@@ -366,6 +460,7 @@ data class M1BUiState(
     val nearbyQuery: String = "",
     val strongOnly: Boolean = false,
     val showDiagnostics: Boolean = false,
+    val mediaStatus: String? = null,
     val sosStatus: String? = null,
     val sosSentAt: String? = null
 )
@@ -386,6 +481,7 @@ private fun TelemetryAppV2(
     onOpenChat: () -> Unit,
     onDraft: (String) -> Unit,
     onSend: () -> Unit,
+    onAttach: () -> Unit,
     onNearbyQuery: (String) -> Unit,
     onStrongOnly: (Boolean) -> Unit,
     onToggleDiagnostics: () -> Unit,
@@ -432,6 +528,7 @@ private fun TelemetryAppV2(
                 state = state,
                 onDraft = onDraft,
                 onSend = onSend,
+                onAttach = onAttach,
                 onMessages = onMessages,
                 onNearby = onNearby,
                 onNetwork = onNetwork,
@@ -824,6 +921,7 @@ private fun ChatScreen(
     state: M1BUiState,
     onDraft: (String) -> Unit,
     onSend: () -> Unit,
+    onAttach: () -> Unit,
     onMessages: () -> Unit,
     onNearby: () -> Unit,
     onNetwork: () -> Unit,
@@ -949,7 +1047,28 @@ private fun ChatScreen(
                         modifier = Modifier.padding(start = 8.dp, bottom = 6.dp)
                     )
                 }
+                state.mediaStatus?.let { status ->
+                    Text(
+                        status,
+                        color = TelemetryBlue,
+                        fontSize = 11.sp,
+                        modifier = Modifier.padding(start = 8.dp, bottom = 6.dp)
+                    )
+                }
                 Row(verticalAlignment = Alignment.CenterVertically) {
+                    Button(
+                        onClick = onAttach,
+                        enabled = state.trustedDeviceId != null,
+                        modifier = Modifier.size(48.dp),
+                        shape = CircleShape,
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = InkRaised,
+                            contentColor = TelemetryBlue
+                        )
+                    ) {
+                        Text("+", color = TelemetryBlue, fontSize = 24.sp)
+                    }
+                    Spacer(Modifier.width(8.dp))
                     OutlinedTextField(
                         value = state.draft,
                         onValueChange = onDraft,
