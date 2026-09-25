@@ -67,12 +67,21 @@ interface TelemetryMeshBridge {
 
 class InMemoryOpaqueRelayStore : TelemetryMeshBridge {
     private val stored = LinkedHashMap<String, OpaqueRelayFrame>()
+    private val seenUntil = LinkedHashMap<String, Long>()
+
+    private fun pruneSeen(nowEpochMs: Long) {
+        val iterator = seenUntil.entries.iterator()
+        while (iterator.hasNext()) {
+            if (iterator.next().value <= nowEpochMs) iterator.remove()
+        }
+    }
 
     override fun ingest(
         frame: OpaqueRelayFrame,
         localDeviceId: String,
         nowEpochMs: Long
     ): MeshIngressDecision {
+        pruneSeen(nowEpochMs)
         if (frame.header.expiresAtEpochMs <= nowEpochMs) {
             return MeshIngressDecision(MeshIngressAction.DROP, "expired")
         }
@@ -85,7 +94,8 @@ class InMemoryOpaqueRelayStore : TelemetryMeshBridge {
         if (frame.header.hopCount >= frame.header.hopLimit) {
             return MeshIngressDecision(MeshIngressAction.DROP, "hop-limit")
         }
-        if (stored.containsKey(frame.header.messageId)) {
+        val seenExpiry = seenUntil[frame.header.messageId]
+        if (stored.containsKey(frame.header.messageId) || (seenExpiry != null && seenExpiry > nowEpochMs)) {
             return MeshIngressDecision(MeshIngressAction.DROP, "duplicate")
         }
         return MeshIngressDecision(MeshIngressAction.RELAY, "relay-eligible")
@@ -94,6 +104,7 @@ class InMemoryOpaqueRelayStore : TelemetryMeshBridge {
     override fun store(frame: OpaqueRelayFrame): Boolean {
         if (stored.containsKey(frame.header.messageId)) return false
         stored[frame.header.messageId] = frame.copyForStore()
+        seenUntil[frame.header.messageId] = frame.header.expiresAtEpochMs
         return true
     }
 
