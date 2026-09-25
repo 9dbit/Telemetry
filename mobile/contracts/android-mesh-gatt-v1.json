@@ -1,0 +1,45 @@
+{
+  "version": "telemetry-android-mesh-gatt/1",
+  "serviceUuid": "f0a0c0de-7e1e-4e7f-9a11-54454c454d59",
+  "characteristics": {
+    "hello": "f0a0c0de-7e1e-4e7f-9a11-54454c454d01",
+    "directMessage": "f0a0c0de-7e1e-4e7f-9a11-54454c454d02",
+    "directReceipt": "f0a0c0de-7e1e-4e7f-9a11-54454c454d03",
+    "meshRelay": "f0a0c0de-7e1e-4e7f-9a11-54454c454d04",
+    "meshRouteAdvertisement": "f0a0c0de-7e1e-4e7f-9a11-54454c454d05"
+  },
+  "meshRelay": {
+    "wire": "telemetry-mesh-relay-wire/1",
+    "properties": ["write-with-response"],
+    "requiresSecureHello": true,
+    "requiresTrustedPeer": true,
+    "nominalMaxWireBytes": 480,
+    "fragmentation": false,
+    "oversizePolicy": "reject-and-let-TransportCoordinator-select-another-adapter"
+  },
+  "meshRouteAdvertisement": {
+    "wire": "telemetry-mesh-route-wire/1",
+    "properties": ["write-with-response"],
+    "requiresSecureHello": true,
+    "requiresTrustedPeer": true,
+    "signatureVerificationBeforeIngest": true,
+    "fragmentation": false
+  },
+  "mtu": {
+    "request": 517,
+    "actualPayloadLimit": "min(480, negotiatedMtu-3)",
+    "silentTruncationAllowed": false
+  },
+  "privacy": {
+    "plaintextAllowed": false,
+    "gpsAllowed": false,
+    "stableRadioAddressAsIdentity": false,
+    "routingIdentity": "Telemetry deviceId"
+  },
+  "invariants": {
+    "directMessageCharacteristicUnchanged": true,
+    "meshSecurityPipelineSeparate": false,
+    "messageIdChangesOnFallback": false,
+    "relayMayDecryptEncodedEnvelope": false
+  }
+}
