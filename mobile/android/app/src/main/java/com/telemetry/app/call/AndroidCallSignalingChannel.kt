@@ -9,13 +9,16 @@ class AndroidCallSignalingChannel(
     private val identity: DeviceIdentity,
     private val controlChannel: AndroidTrustedControlChannel,
     private val node: AndroidMeshNodeRuntime
-) {
+) : CallSignalPort {
     companion object {
         private const val SIGNAL_TTL_MS = 2 * 60_000L
         private const val SIGNAL_HOP_LIMIT = 8
     }
 
-    fun send(signal: NativeCallSignal, nowEpochMs: Long = System.currentTimeMillis()): MeshSendResult {
+    override fun send(signal: NativeCallSignal, nowEpochMs: Long): Boolean =
+        sendWithResult(signal, nowEpochMs).sent
+
+    fun sendWithResult(signal: NativeCallSignal, nowEpochMs: Long = System.currentTimeMillis()): MeshSendResult {
         AndroidCallProtocol.validate(signal)
         require(signal.fromId == identity.deviceId) { "call signaling sender identity mismatch" }
         val wire = controlChannel.create(
