@@ -21,12 +21,14 @@ data class NativeIceCandidate(
 }
 
 sealed interface RealtimeCallMediaEvent {
-    data class LocalOffer(val callId: String, val sessionDescription: String) : RealtimeCallMediaEvent
-    data class LocalAnswer(val callId: String, val sessionDescription: String) : RealtimeCallMediaEvent
-    data class LocalIceCandidate(val callId: String, val candidate: NativeIceCandidate) : RealtimeCallMediaEvent
-    data class Connected(val callId: String) : RealtimeCallMediaEvent
-    data class Disconnected(val callId: String, val reason: String) : RealtimeCallMediaEvent
-    data class Failed(val callId: String, val reason: String) : RealtimeCallMediaEvent
+    val callId: String
+
+    data class LocalOffer(override val callId: String, val sessionDescription: String) : RealtimeCallMediaEvent
+    data class LocalAnswer(override val callId: String, val sessionDescription: String) : RealtimeCallMediaEvent
+    data class LocalIceCandidate(override val callId: String, val candidate: NativeIceCandidate) : RealtimeCallMediaEvent
+    data class Connected(override val callId: String) : RealtimeCallMediaEvent
+    data class Disconnected(override val callId: String, val reason: String) : RealtimeCallMediaEvent
+    data class Failed(override val callId: String, val reason: String) : RealtimeCallMediaEvent
 }
 
 interface RealtimeCallMediaEngine {
