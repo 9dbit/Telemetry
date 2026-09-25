@@ -101,10 +101,15 @@ class AndroidMediaPackageBuilder(
                 )
                 val wire = AndroidMediaChunkWireCodec.encode(encrypted)
                 val result = store.put(wire, expiresAtEpochMs)
-                if (result.accepted || result.reason == "duplicate") stored += 1
+                when {
+                    result.accepted || result.reason == "duplicate" -> stored += 1
+                    result.reason == "conflict" -> error("conflicting encrypted media chunk ${result.index}")
+                    else -> error("unable to persist encrypted media chunk ${result.index}: ${result.reason}")
+                }
             }
             require(input.read() == -1) { "media input exceeds declared byteLength" }
         }
+        require(stored == count) { "media package storage incomplete" }
 
         return NativeMediaPackageResult(manifest, stored)
     }
