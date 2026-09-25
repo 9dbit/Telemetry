@@ -3,6 +3,8 @@ import type {
   DeliveryEvent,
   ErrorEvent,
   MessageEvent,
+  MediaEvent,
+  NotificationOpenEvent,
   PeerSeenEvent,
   StateEvent,
   TelemetryCapabilities,
@@ -18,16 +20,34 @@ type TelemetryEvents = {
   onTrusted(event: TrustedEvent): void;
   onMessage(event: MessageEvent): void;
   onDelivery(event: DeliveryEvent): void;
+  onMedia(event: MediaEvent): void;
+  onNotificationOpen(event: NotificationOpenEvent): void;
   onError(event: ErrorEvent): void;
 };
 
 declare class TelemetryIosNativeModule extends NativeModule<TelemetryEvents> {
   getIdentity(): TelemetryIdentity;
   getCapabilities(): TelemetryCapabilities;
+  getLocalState(): string;
+  getLaunchArguments(): string[];
+  getReliabilityDiagnostics(): string;
+  resetReliabilityDiagnostics(): void;
+  replayLastEncryptedFrameForTest(peerId: string): Promise<boolean>;
+  consumePendingNotificationOpen(): string | null;
+  setLocalProfile(displayName: string, about: string, sourcePhotoUri?: string | null, templateId?: string | null): Promise<{ displayName: string; about: string; photoUri?: string; templateId?: string; updatedAt: number }>;
+  setAppearance(mode: 'system' | 'light' | 'dark'): Promise<'system' | 'light' | 'dark'>;
+  setContactAlias(deviceId: string, alias: string): Promise<boolean>;
+  markConversationRead(deviceId: string): Promise<boolean>;
   startOffline(): Promise<void>;
   stopOffline(): Promise<void>;
   connect(peerId: string): Promise<void>;
+  recoverTransport(peerId: string): Promise<void>;
   trustPeer(deviceId: string): Promise<boolean>;
+  enqueueText(peerId: string, peerDeviceId: string, text: string): Promise<string>;
+  sendQueuedText(peerId: string, messageId: string): Promise<string>;
+  sendQueuedTextUsingTransport(peerId: string, messageId: string, transport: 'auto' | 'ble' | 'wifi'): Promise<string>;
+  sendMedia(peerDeviceId: string, uri: string, kind: 'photo' | 'video' | 'file', mimeType: string, fileName: string): Promise<string>;
+  resumeMedia(peerDeviceId?: string | null): Promise<number>;
   sendText(peerId: string, text: string): Promise<string>;
 }
 

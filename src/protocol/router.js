@@ -1,4 +1,4 @@
-const PRIORITY = ['wifi-direct', 'wifi-aware', 'ble', 'internet', 'lora', 'satellite-gateway'];
+const PRIORITY = ['wifi-direct', 'wifi-local', 'wifi-aware', 'ble', 'internet', 'lora', 'satellite-gateway'];
 
 export function selectTransport({ payloadBytes = 0, transports = [] }) {
   const available = transports.filter((transport) => transport?.available);

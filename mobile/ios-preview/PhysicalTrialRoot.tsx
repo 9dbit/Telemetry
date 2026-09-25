@@ -192,11 +192,6 @@ export default function PhysicalTrialRoot() {
   return (
     <View style={styles.root}>
       <App />
-      <Pressable style={styles.fab} onPress={() => setOpen(true)}>
-        <Text style={styles.fabText}>M1 TRIAL</Text>
-        <View style={[styles.fabDot, { backgroundColor: selfTest?.passed ? '#38E2C2' : '#E55C6A' }]} />
-      </Pressable>
-
       <Modal visible={open} animationType="slide" onRequestClose={() => setOpen(false)}>
         <SafeAreaView style={styles.safe}>
           <View style={styles.header}>

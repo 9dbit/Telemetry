@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Telemetry Control Center</title>
+  <link rel="stylesheet" href="/admin.css" />
+</head>
+<body>
+  <aside class="sidebar">
+    <div class="brand"><span class="brand-dot"></span><strong>Telemetry</strong><small>Control Center</small></div>
+    <nav>
+      <button class="nav active" data-view="overview">Overview</button>
+      <button class="nav" data-view="devices">Devices</button>
+      <button class="nav" data-view="field">Field View</button>
+      <button class="nav" data-view="privacy">Privacy</button>
+    </nav>
+    <div class="privacy-badge">P2P content remains E2E encrypted</div>
+  </aside>
+
+  <main>
+    <header>
+      <div><h1>Control Center</h1><p id="subtitle">Operational metadata, never communication content.</p></div>
+      <div class="header-actions"><span id="apiStatus" class="status">Not connected</span><button id="authButton">Connect admin</button></div>
+    </header>
+
+    <section id="overview" class="view active">
+      <div id="metricGrid" class="metric-grid"></div>
+      <div class="split">
+        <article class="panel"><div class="panel-head"><h2>Usage signals</h2><span>Aggregate only</span></div><div id="usageBars" class="bars"></div></article>
+        <article class="panel"><div class="panel-head"><h2>System boundary</h2><span>Privacy guard</span></div>
+          <ul class="guard-list"><li>Message text: never collected</li><li>Media payload: never collected</li><li>Call audio/video: never collected</li><li>Private keys: never collected</li><li>Location: explicit opt-in only</li></ul>
+        </article>
+      </div>
+    </section>
+
+    <section id="devices" class="view">
+      <article class="panel table-panel"><div class="panel-head"><h2>Devices & profiles</h2><button class="ghost" id="refreshDevices">Refresh</button></div>
+        <div class="table-wrap"><table><thead><tr><th>Profile</th><th>Platform</th><th>Last seen</th><th>Paired</th><th>Screen time</th><th>Last IP</th><th>Status</th><th>Action</th></tr></thead><tbody id="deviceRows"></tbody></table></div>
+      </article>
+    </section>
+
+    <section id="field" class="view">
+      <article class="panel field-panel"><div class="panel-head"><div><h2>Field View</h2><p>Only peers who explicitly opted into location sync appear here.</p></div><button class="ghost" id="refreshField">Refresh</button></div>
+        <div id="fieldMap" class="field-map"><div class="map-grid"></div><div id="fieldEmpty" class="field-empty">No consented location snapshots yet.</div></div>
+      </article>
+    </section>
+
+    <section id="privacy" class="view">
+      <article class="panel prose"><h2>Cloud boundary</h2><p>The server receives operational metadata only. Offline messages, files, photos, videos, and real-time call content stay on the peer-to-peer data plane.</p>
+        <h3>Allowed</h3><p>Downloads, active sessions, aggregate resource use, transfer counts/bytes, call duration, screen time, paired-contact count, public profile fields if sync is enabled, and consented location.</p>
+        <h3>Rejected by schema</h3><p>Message text, filenames, plaintext/ciphertext dumps, private keys, safety codes, local contact names, and call/media content.</p>
+      </article>
+    </section>
+  </main>
+
+  <dialog id="authDialog"><form method="dialog"><h2>Admin API</h2><p>Enter the development admin token. Production will sit behind Cloudflare Access as an additional gate.</p><input id="tokenInput" type="password" autocomplete="off" placeholder="ADMIN_API_TOKEN" /><div class="dialog-actions"><button value="cancel" class="ghost">Cancel</button><button id="saveToken" value="default">Connect</button></div></form></dialog>
+  <script type="module" src="/admin.js"></script>
+</body>
+</html>

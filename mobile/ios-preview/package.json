@@ -1,19 +1,26 @@
 {
   "name": "telemetry-ios-preview",
   "version": "0.1.0",
+  "description": "Telemetry native iOS preview shell",
   "private": true,
   "main": "index.ts",
   "scripts": {
-    "postinstall": "node scripts/patch-expo-modules-jsi.mjs",
+    "postinstall": "node scripts/patch-expo-modules-jsi.mjs && node scripts/patch-telemetry-ios-bidirectional.mjs",
     "start": "expo start --dev-client",
     "prebuild": "expo prebuild --clean --platform ios",
     "ios": "expo run:ios --device",
     "typecheck": "tsc --noEmit",
-    "doctor": "expo-doctor"
+    "doctor": "expo-doctor",
+    "reliability:hardware": "./scripts/run-reliability-hardware.sh"
   },
   "dependencies": {
-    "expo": "57.0.24",
+    "expo": "~57.0.25",
+    "expo-blur": "~57.0.3",
     "expo-dev-client": "~57.0.19",
+    "expo-document-picker": "~57.0.2",
+    "expo-font": "~57.0.4",
+    "expo-image-picker": "~57.0.20",
+    "expo-symbols": "~57.0.3",
     "react": "19.2.3",
     "react-native": "0.86.3",
     "telemetry-ios-native": "file:./modules/telemetry-ios-native"

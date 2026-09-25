@@ -1,0 +1,75 @@
+{
+  "version": "telemetry-mesh-relay/1",
+  "milestone": "M1.4E-three-device-multihop",
+  "sourceProtocol": "telemetry/0.1",
+  "principles": {
+    "messageIdStableEndToEnd": true,
+    "senderSignaturePreservedAcrossRelays": true,
+    "relayPayloadVisibility": "opaque",
+    "finalRecipientOnlyDecrypts": true,
+    "relayStoreContainsCiphertextOnly": true,
+    "transportSelectionOutsideMessageSecurity": true
+  },
+  "relayFrame": {
+    "requiredFields": [
+      "messageId",
+      "envelope",
+      "relayPath",
+      "createdAt",
+      "expiresAt",
+      "lastForwardedAt"
+    ],
+    "relayMutableFields": [
+      "envelope.hopCount",
+      "relayPath",
+      "lastForwardedAt"
+    ],
+    "immutableEnvelopeFields": [
+      "protocol",
+      "messageId",
+      "conversationId",
+      "senderId",
+      "recipientId",
+      "createdAt",
+      "hopLimit",
+      "contentType",
+      "payload",
+      "signature"
+    ],
+    "maxHopLimit": 32,
+    "defaultTtlMs": 600000
+  },
+  "routeAdvertisement": {
+    "protocol": "telemetry/mesh-route/0.1",
+    "signature": "Ed25519",
+    "sequence": "strictly-monotonic-per-advertiser",
+    "maxRoutes": 32,
+    "maxTtlMs": 30000,
+    "splitHorizon": true
+  },
+  "relayLifecycle": [
+    "ingress-verify",
+    "dedupe",
+    "deliver-local-or-store",
+    "route-resolve",
+    "forward",
+    "retry-or-remove"
+  ],
+  "nativeEvents": [
+    "route-advertisement",
+    "relay-stored",
+    "relay-forwarded",
+    "relay-retry",
+    "relay-dropped",
+    "final-receipt-routed"
+  ],
+  "transportAdapters": [
+    "ble",
+    "wifi-direct"
+  ],
+  "futureAdapters": [
+    "lora",
+    "satellite-gateway",
+    "internet-relay"
+  ]
+}
