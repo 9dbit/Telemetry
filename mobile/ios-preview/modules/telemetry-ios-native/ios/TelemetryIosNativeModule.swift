@@ -17,6 +17,7 @@ private let messageContext = "telemetry/m1b/message"
 private let receiptContext = "telemetry/m1b/receipt"
 private let maxClockSkewMs: Int64 = 15 * 60 * 1000
 private let maxTextBytes = 160
+private let profileControlPrefix = "\u{2063}TLM_PROFILE:"
 
 private enum TelemetryNativeError: LocalizedError {
   case message(String)
@@ -518,6 +519,9 @@ private struct LocalContactRecord: Codable {
   var alias: String
   var updatedAt: Int64
   var unreadCount: Int? = nil
+  var profileDisplayName: String? = nil
+  var profileTemplateId: String? = nil
+  var profilePhotoUri: String? = nil
 }
 
 private struct LocalProfileRecord: Codable {
@@ -667,6 +671,44 @@ private final class LocalVault {
     state.contacts[index].updatedAt = TelemetryCryptoEngine.nowMs()
     try? save()
     return true
+  }
+
+  func updateContactProfile(deviceId: String, displayName: String?, templateId: String?) -> Bool {
+    guard let index = state.contacts.firstIndex(where: { $0.deviceId == deviceId }) else { return false }
+    let cleanName = String((displayName ?? "").trimmingCharacters(in: .whitespacesAndNewlines).prefix(48))
+    let allowedTemplates = Set((1...6).map { "avatar-\($0)" })
+    state.contacts[index].profileDisplayName = cleanName.nilIfBlank
+    state.contacts[index].profileTemplateId = templateId.flatMap { allowedTemplates.contains($0) ? $0 : nil }
+    if state.contacts[index].profileTemplateId != nil {
+      state.contacts[index].profilePhotoUri = nil
+    }
+    state.contacts[index].updatedAt = TelemetryCryptoEngine.nowMs()
+    try? save()
+    return true
+  }
+
+  func setContactProfilePhoto(deviceId: String, photoUri: String) -> Bool {
+    guard let index = state.contacts.firstIndex(where: { $0.deviceId == deviceId }),
+          let sourceURL = URL(string: photoUri), sourceURL.isFileURL else { return false }
+    let profileDir = directoryURL.appendingPathComponent("peer-profiles", isDirectory: true)
+    try? FileManager.default.createDirectory(at: profileDir, withIntermediateDirectories: true)
+    let safeName = deviceId.data(using: .utf8)?.base64EncodedString()
+      .replacingOccurrences(of: "/", with: "_")
+      .replacingOccurrences(of: "+", with: "-") ?? UUID().uuidString
+    let destination = profileDir.appendingPathComponent("\(safeName).jpg")
+    do {
+      if sourceURL.standardizedFileURL != destination.standardizedFileURL {
+        try? FileManager.default.removeItem(at: destination)
+        try FileManager.default.copyItem(at: sourceURL, to: destination)
+      }
+      state.contacts[index].profilePhotoUri = destination.absoluteString
+      state.contacts[index].profileTemplateId = nil
+      state.contacts[index].updatedAt = TelemetryCryptoEngine.nowMs()
+      try? save()
+      return true
+    } catch {
+      return false
+    }
   }
 
   func incrementUnread(deviceId: String) {
@@ -1019,6 +1061,10 @@ private final class TelemetryIosCore: NSObject, CBCentralManagerDelegate, CBPeri
     return result
   }
 
+  func setContactProfilePhoto(deviceId: String, photoUri: String) -> Bool {
+    vault.setContactProfilePhoto(deviceId: deviceId, photoUri: photoUri)
+  }
+
   func start() {
     desiredRunning = true
     logReliability("start")
@@ -1202,6 +1248,56 @@ private final class TelemetryIosCore: NSObject, CBCentralManagerDelegate, CBPeri
         }
       }
     }
+  }
+
+  @MainActor
+  func sendProfile(peerId: String, peerDeviceId: String, displayName: String, templateId: String?) async throws -> String {
+    guard let session = sessions[peerId],
+          let remote = session.remoteHello,
+          let key = session.sessionKey else {
+      throw TelemetryNativeError.message("Secure peer session is incomplete")
+    }
+    guard trust.isVerified(remote), remote.deviceId == peerDeviceId else {
+      throw TelemetryNativeError.message("Trusted profile peer binding mismatch")
+    }
+
+    let cleanName = String(displayName.trimmingCharacters(in: .whitespacesAndNewlines).prefix(28))
+    var payload: [String: String] = ["n": cleanName]
+    if let templateId, (1...6).map({ "avatar-\($0)" }).contains(templateId) {
+      payload["t"] = templateId
+    }
+    let jsonData = try JSONSerialization.data(withJSONObject: payload, options: [])
+    guard let json = String(data: jsonData, encoding: .utf8) else {
+      throw TelemetryNativeError.message("Could not encode peer profile")
+    }
+    let clear = profileControlPrefix + json
+    guard clear.utf8.count <= maxTextBytes else {
+      throw TelemetryNativeError.message("Peer profile control frame is too large")
+    }
+
+    let messageId = "profile:" + UUID().uuidString.lowercased()
+    let message = try TelemetryCryptoEngine.encryptText(
+      key: key,
+      senderId: crypto.deviceId,
+      recipientId: remote.deviceId,
+      text: clear,
+      messageId: messageId
+    )
+    let frame = try FrameCodec.encodeMessage(message)
+    session.lastOutboundFrame = frame
+
+    if wifiTransport.isAvailable(deviceId: remote.deviceId) {
+      session.lastOutboundMessageId = messageId
+      let receipt = try await wifiTransport.send(deviceId: remote.deviceId, frame: frame)
+      DispatchQueue.main.async { [weak self] in
+        guard let self else { return }
+        try? self.acceptReceipt(peerId: peerId, frame: receipt)
+      }
+      return messageId
+    }
+
+    try sendFrameOverBle(peerId: peerId, session: session, frame: frame, messageId: messageId)
+    return messageId
   }
 
   func enqueueText(peerId: String, peerDeviceId: String, text: String) throws -> String {
@@ -1611,6 +1707,26 @@ private final class TelemetryIosCore: NSObject, CBCentralManagerDelegate, CBPeri
     }
 
     let clear = try TelemetryCryptoEngine.decryptText(key: key, message: message)
+    if message.messageId.hasPrefix("profile:") && clear.hasPrefix(profileControlPrefix) {
+      guard replay.accept(message.messageId) else { return receipt }
+      let raw = String(clear.dropFirst(profileControlPrefix.count))
+      if let data = raw.data(using: .utf8),
+         let payload = try? JSONSerialization.jsonObject(with: data) as? [String: String] {
+        vault.upsertContact(deviceId: remote.deviceId, peerId: peerId)
+        _ = vault.updateContactProfile(
+          deviceId: remote.deviceId,
+          displayName: payload["n"],
+          templateId: payload["t"]
+        )
+        emit("onProfile", [
+          "peerId": peerId,
+          "deviceId": remote.deviceId,
+          "displayName": payload["n"] ?? "",
+          "templateId": payload["t"] ?? ""
+        ])
+      }
+      return receipt
+    }
     if vault.containsIncomingMessage(id: message.messageId, peerDeviceId: remote.deviceId) {
       duplicateFramesSuppressed += 1
       if reliabilityLoggingEnabled {
@@ -2006,6 +2122,7 @@ public class TelemetryIosNativeModule: Module {
       "onVerification",
       "onTrusted",
       "onMessage",
+      "onProfile",
       "onDelivery",
       "onMedia",
       "onNotificationOpen",
@@ -2071,6 +2188,10 @@ public class TelemetryIosNativeModule: Module {
       self.core.markConversationRead(deviceId: deviceId)
     }.runOnQueue(.main)
 
+    AsyncFunction("setContactProfilePhoto") { (deviceId: String, photoUri: String) in
+      self.core.setContactProfilePhoto(deviceId: deviceId, photoUri: photoUri)
+    }.runOnQueue(.main)
+
     AsyncFunction("startOffline") {
       self.core.start()
     }.runOnQueue(.main)
@@ -2094,6 +2215,10 @@ public class TelemetryIosNativeModule: Module {
     AsyncFunction("enqueueText") { (peerId: String, peerDeviceId: String, text: String) in
       try self.core.enqueueText(peerId: peerId, peerDeviceId: peerDeviceId, text: text)
     }.runOnQueue(.main)
+
+    AsyncFunction("sendProfile") { (peerId: String, peerDeviceId: String, displayName: String, templateId: String?) async throws -> String in
+      try await self.core.sendProfile(peerId: peerId, peerDeviceId: peerDeviceId, displayName: displayName, templateId: templateId)
+    }
 
     AsyncFunction("sendQueuedText") { (peerId: String, messageId: String) async throws -> String in
       try await self.core.sendQueuedTextAdaptive(peerId: peerId, messageId: messageId)

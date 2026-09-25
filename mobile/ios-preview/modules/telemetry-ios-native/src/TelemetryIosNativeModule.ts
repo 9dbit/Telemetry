@@ -5,6 +5,7 @@ import type {
   MessageEvent,
   MediaEvent,
   NotificationOpenEvent,
+  ProfileEvent,
   PeerSeenEvent,
   StateEvent,
   TelemetryCapabilities,
@@ -19,6 +20,7 @@ type TelemetryEvents = {
   onVerification(event: VerificationEvent): void;
   onTrusted(event: TrustedEvent): void;
   onMessage(event: MessageEvent): void;
+  onProfile(event: ProfileEvent): void;
   onDelivery(event: DeliveryEvent): void;
   onMedia(event: MediaEvent): void;
   onNotificationOpen(event: NotificationOpenEvent): void;
@@ -38,12 +40,14 @@ declare class TelemetryIosNativeModule extends NativeModule<TelemetryEvents> {
   setAppearance(mode: 'system' | 'light' | 'dark'): Promise<'system' | 'light' | 'dark'>;
   setContactAlias(deviceId: string, alias: string): Promise<boolean>;
   markConversationRead(deviceId: string): Promise<boolean>;
+  setContactProfilePhoto(deviceId: string, photoUri: string): Promise<boolean>;
   startOffline(): Promise<void>;
   stopOffline(): Promise<void>;
   connect(peerId: string): Promise<void>;
   recoverTransport(peerId: string): Promise<void>;
   trustPeer(deviceId: string): Promise<boolean>;
   enqueueText(peerId: string, peerDeviceId: string, text: string): Promise<string>;
+  sendProfile(peerId: string, peerDeviceId: string, displayName: string, templateId?: string | null): Promise<string>;
   sendQueuedText(peerId: string, messageId: string): Promise<string>;
   sendQueuedTextUsingTransport(peerId: string, messageId: string, transport: 'auto' | 'ble' | 'wifi'): Promise<string>;
   sendMedia(peerDeviceId: string, uri: string, kind: 'photo' | 'video' | 'file', mimeType: string, fileName: string): Promise<string>;

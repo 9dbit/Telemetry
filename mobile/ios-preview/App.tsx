@@ -172,6 +172,7 @@ export default function App() {
   const runningRef = useRef(false);
   const peersRef = useRef<Record<string, Peer>>({});
   const contactsRef = useRef<Contact[]>([]);
+  const profileRef = useRef<LocalProfile>(EMPTY_PROFILE);
   const trustedPeerRef = useRef<TrustedPeer | null>(null);
   const chatOpenRef = useRef(false);
   const pendingRef = useRef<Record<string, PendingIntent>>({});
@@ -230,6 +231,7 @@ export default function App() {
   useEffect(() => { runningRef.current = running; }, [running]);
   useEffect(() => { peersRef.current = peers; }, [peers]);
   useEffect(() => { contactsRef.current = contacts; }, [contacts]);
+  useEffect(() => { profileRef.current = profile; }, [profile]);
   useEffect(() => { trustedPeerRef.current = trustedPeer; }, [trustedPeer]);
   useEffect(() => { chatOpenRef.current = chatOpen; }, [chatOpen]);
   useEffect(() => { nearbyTransformRef.current = nearbyTransform; }, [nearbyTransform]);
@@ -260,7 +262,9 @@ export default function App() {
     try {
       const state = JSON.parse(Telemetry.getLocalState()) as LocalState;
       const localContacts = state.contacts ?? [];
-      setProfile(state.profile ?? EMPTY_PROFILE);
+      const nextProfile = state.profile ?? EMPTY_PROFILE;
+      profileRef.current = nextProfile;
+      setProfile(nextProfile);
       setAppearanceMode(state.appearance ?? 'dark');
       const existingPending = pendingRef.current;
       const contactByDevice = new Map(localContacts.map(contact => [contact.deviceId, contact]));
@@ -365,6 +369,7 @@ export default function App() {
         setSessionReady(true);
         hydrateLocalState();
         setChatOpen(true);
+        void syncProfileToPeer(event.peerId, event.deviceId);
         void flushPending(event.peerId);
       }),
       Telemetry.addListener('onMessage', event => {
@@ -388,6 +393,12 @@ export default function App() {
         refreshReliabilityDiagnostics();
       }),
       Telemetry.addListener('onMedia', event => {
+        if (event.fileName === '__telemetry_profile_avatar.jpg') {
+          if (event.state === 'incomingReady' && event.peerDeviceId && event.localUri) {
+            void Telemetry.setContactProfilePhoto(event.peerDeviceId, event.localUri).then(() => hydrateLocalState());
+          }
+          return;
+        }
         setMediaTransfers(current => ({
           ...current,
           [event.assetId]: {
@@ -398,6 +409,7 @@ export default function App() {
           },
         }));
       }),
+      Telemetry.addListener('onProfile', () => hydrateLocalState()),
       Telemetry.addListener('onNotificationOpen', event => {
         Telemetry.consumePendingNotificationOpen();
         openConversationByDeviceId(event.deviceId);
@@ -480,7 +492,7 @@ export default function App() {
     ? contacts.find(item => item.peerId === selectedNearbyPeer.peerId)
     : undefined;
   const selectedNearbyName = selectedNearbyPeer
-    ? selectedNearbyContact?.alias || selectedNearbyPeer.name || shortId(selectedNearbyPeer.peerId)
+    ? selectedNearbyContact?.alias || selectedNearbyContact?.profileDisplayName || selectedNearbyPeer.name || shortId(selectedNearbyPeer.peerId)
     : '';
 
   function setNearbyView(next: { x: number; y: number; scale: number }) {
@@ -688,6 +700,7 @@ export default function App() {
     }
     try {
       setAttachmentMenuOpen(false);
+      await new Promise(resolve => setTimeout(resolve, 140));
       let uri = '';
       let mimeType = 'application/octet-stream';
       let fileName = `telemetry-${Date.now()}`;
@@ -791,6 +804,18 @@ export default function App() {
     setProfileDraft(current => ({ ...current, photoUri: result.assets[0].uri, templateId: undefined }));
   }
 
+  async function syncProfileToPeer(peerId: string, deviceId: string, currentProfile: LocalProfile = profileRef.current) {
+    try {
+      await Telemetry.sendProfile(peerId, deviceId, currentProfile.displayName, currentProfile.templateId ?? null);
+      if (currentProfile.photoUri) {
+        await Telemetry.sendMedia(deviceId, currentProfile.photoUri, 'photo', 'image/jpeg', '__telemetry_profile_avatar.jpg');
+        void Telemetry.resumeMedia(deviceId);
+      }
+    } catch {
+      // Profile sync is best-effort and retries naturally on the next trusted session.
+    }
+  }
+
   async function saveProfile() {
     if (profileSaving) return;
     setProfileSaving(true);
@@ -801,10 +826,12 @@ export default function App() {
         profileDraft.templateId ? null : profileDraft.photoUri ?? null,
         profileDraft.templateId ?? null,
       );
+      profileRef.current = saved;
       setProfile(saved);
       setProfileDraft(saved);
       setProfileEditOpen(false);
       hydrateLocalState();
+      if (trustedPeerRef.current) void syncProfileToPeer(trustedPeerRef.current.peerId, trustedPeerRef.current.deviceId, saved);
     } catch (error) {
       Alert.alert('Profile', `Could not save profile yet. ${String(error)}`);
     } finally {
@@ -886,7 +913,7 @@ export default function App() {
           if (ok) hydrateLocalState();
         });
       } },
-    ], 'plain-text', contact.alias || shortId(contact.deviceId));
+    ], 'plain-text', contact.alias || contact.profileDisplayName || shortId(contact.deviceId));
   }
 
   function openContact(contact: Contact) {
@@ -907,7 +934,7 @@ export default function App() {
     : undefined;
   const activePending = activeMessages.filter(item => item.mine && item.state !== 'delivered');
   const activeHasPending = activePending.length > 0;
-  const activePeerName = activeContact?.alias || (trustedPeer ? shortId(trustedPeer.deviceId) : 'Telemetry peer');
+  const activePeerName = activeContact?.alias || activeContact?.profileDisplayName || (trustedPeer ? shortId(trustedPeer.deviceId) : 'Telemetry peer');
   const chatRouteLabel = sessionReady
     ? 'CONNECTED · ENCRYPTED'
     : activeHasPending
@@ -972,9 +999,9 @@ export default function App() {
               return (
                 <Pressable key={contact.deviceId} style={[styles.card, styles.chatRow]} onPress={() => openContact(contact)} onLongPress={() => void renameContact(contact)}>
                   <View style={styles.rowBetween}>
-                    <PeerAvatar name={contact.alias || shortId(contact.deviceId)} photoUri={contact.profilePhotoUri} trusted size={46} />
+                    <PeerAvatar name={contact.alias || contact.profileDisplayName || shortId(contact.deviceId)} photoUri={contact.profilePhotoUri} templateId={contact.profileTemplateId} trusted size={46} />
                     <View style={styles.flex}>
-                      <Text style={styles.cardTitle}>{contact.alias || shortId(contact.deviceId)}</Text>
+                      <Text style={styles.cardTitle}>{contact.alias || contact.profileDisplayName || shortId(contact.deviceId)}</Text>
                       <Text style={styles.cardCopy}>{last?.text ?? 'Trusted peer · ready when reachable'}</Text>
                     </View>
                     <View style={styles.chatListMeta}>
@@ -1025,10 +1052,10 @@ export default function App() {
                   contentContainerStyle={styles.nearbyList}
                   renderItem={({ item }) => {
                     const contact = contacts.find(value => value.peerId === item.peerId);
-                    const name = contact?.alias || item.name || shortId(item.peerId);
+                    const name = contact?.alias || contact?.profileDisplayName || item.name || shortId(item.peerId);
                     return (
                       <Pressable style={styles.nearbyListRow} onPress={() => setSelectedNearbyPeer(item)}>
-                        <PeerAvatar name={name} photoUri={contact?.profilePhotoUri} trusted={!!contact} size={48} />
+                        <PeerAvatar name={name} photoUri={contact?.profilePhotoUri} templateId={contact?.profileTemplateId} trusted={!!contact} size={48} />
                         <View style={styles.flex}>
                           <View style={styles.rowBetween}>
                             <Text numberOfLines={1} style={styles.nearbyPeerName}>{name}</Text>
@@ -1064,7 +1091,7 @@ export default function App() {
                         const name = contact?.alias || peer.name || shortId(peer.peerId);
                         return (
                           <Pressable key={peer.peerId} onPress={() => setSelectedNearbyPeer(peer)} style={[styles.fieldPeer, { left: position.x - 56, top: position.y - 34 }] }>
-                            <PeerAvatar name={name} photoUri={contact?.profilePhotoUri} trusted={!!contact} size={44} />
+                            <PeerAvatar name={name} photoUri={contact?.profilePhotoUri} templateId={contact?.profileTemplateId} trusted={!!contact} size={44} />
                             <Text numberOfLines={1} style={styles.fieldPeerLabel}>{name}</Text>
                             <Text style={styles.fieldPeerRssi}>{peer.rssi} dBm</Text>
                           </Pressable>
@@ -1086,7 +1113,7 @@ export default function App() {
               <View style={styles.peerProfileSheet}>
                 <View style={styles.peerProfileHandle} />
                 <View style={styles.peerProfileHeader}>
-                  <PeerAvatar name={selectedNearbyName} photoUri={selectedNearbyContact?.profilePhotoUri} trusted={!!selectedNearbyContact} size={58} />
+                  <PeerAvatar name={selectedNearbyName} photoUri={selectedNearbyContact?.profilePhotoUri} templateId={selectedNearbyContact?.profileTemplateId} trusted={!!selectedNearbyContact} size={58} />
                   <View style={styles.flex}>
                     <Text style={styles.eyebrow}>{selectedNearbyContact ? 'TRUSTED CONTACT' : 'DETECTED PEER'}</Text>
                     <Text style={styles.peerProfileTitle}>{selectedNearbyName}</Text>
@@ -1314,29 +1341,6 @@ export default function App() {
         </View>
       </Modal>
 
-      <Modal visible={attachmentMenuOpen} transparent animationType="fade" onRequestClose={() => setAttachmentMenuOpen(false)}>
-        <View style={styles.attachmentBackdrop}>
-          <Pressable style={styles.attachmentDismissLayer} onPress={() => setAttachmentMenuOpen(false)} />
-          <BlurView intensity={55} tint={resolvedAppearance === 'light' ? 'light' : 'dark'} style={styles.attachmentSheet}>
-            <Image source={GLASS_NOISE} resizeMode="repeat" style={styles.glassNoiseStrong} />
-            <Text style={styles.attachmentTitle}>Attach securely</Text>
-            <Text style={styles.attachmentCopy}>Encrypted locally before transfer. Offline items stay queued.</Text>
-            <View style={styles.attachmentActions}>
-              {[
-                ['photo', 'photo.fill', 'Photo'],
-                ['video', 'video.fill', 'Video'],
-                ['file', 'doc.fill', 'File'],
-              ].map(([kind, icon, label]) => (
-                <Pressable key={kind} style={styles.attachmentAction} onPress={() => void pickAndSendMedia(kind as 'photo' | 'video' | 'file')}>
-                  <SymbolView name={icon as any} size={23} tintColor={C.blue} />
-                  <Text style={styles.attachmentActionText}>{label}</Text>
-                </Pressable>
-              ))}
-            </View>
-          </BlurView>
-        </View>
-      </Modal>
-
       <Modal visible={!!verification} transparent animationType="slide" onRequestClose={() => setVerification(null)}>
         <View style={styles.backdrop}>
           <View style={styles.sheet}>
@@ -1366,7 +1370,7 @@ export default function App() {
                 <SymbolView name={'chevron.left' as any} size={22} tintColor={C.blue} weight="semibold" />
               </Pressable>
               <Pressable style={styles.chatPeerHeader} onLongPress={() => activeContact && void renameContact(activeContact)}>
-                <PeerAvatar name={activePeerName} photoUri={activeContact?.profilePhotoUri} trusted size={36} />
+                <PeerAvatar name={activePeerName} photoUri={activeContact?.profilePhotoUri} templateId={activeContact?.profileTemplateId} trusted size={36} />
                 <View>
                   <Text style={styles.chatPeerName}>{activePeerName}</Text>
                   <Text style={styles.chatPeerRoute}>{chatRouteLabel}</Text>
@@ -1395,7 +1399,7 @@ export default function App() {
               maintainVisibleContentPosition={{ minIndexForVisible: 0 }}
               renderItem={({ item }) => (
                 <View style={[styles.messageRow, item.mine ? styles.messageRowMine : styles.messageRowTheirs]}>
-                  {!item.mine && <PeerAvatar name={activePeerName} photoUri={activeContact?.profilePhotoUri} trusted size={30} />}
+                  {!item.mine && <PeerAvatar name={activePeerName} photoUri={activeContact?.profilePhotoUri} templateId={activeContact?.profileTemplateId} trusted size={30} />}
                   <View style={styles.bubbleWrap}>
                     <View style={[styles.bubbleTail, item.mine ? styles.bubbleTailMine : styles.bubbleTailTheirs]} />
                     <BlurView intensity={28} tint={resolvedAppearance === 'light' ? 'light' : 'dark'} style={[styles.bubble, item.mine ? styles.mine : styles.theirs]}>
@@ -1433,6 +1437,28 @@ export default function App() {
                 <SymbolView name={'arrow.up' as any} size={21} tintColor="#FFF" weight="bold" />
               </Pressable>
             </View>
+            {attachmentMenuOpen && (
+        <View style={styles.attachmentBackdrop}>
+          <Pressable style={styles.attachmentDismissLayer} onPress={() => setAttachmentMenuOpen(false)} />
+          <BlurView intensity={55} tint={resolvedAppearance === 'light' ? 'light' : 'dark'} style={styles.attachmentSheet}>
+            <Image source={GLASS_NOISE} resizeMode="repeat" style={styles.glassNoiseStrong} />
+            <Text style={styles.attachmentTitle}>Attach securely</Text>
+            <Text style={styles.attachmentCopy}>Encrypted locally before transfer. Offline items stay queued.</Text>
+            <View style={styles.attachmentActions}>
+              {[
+                ['photo', 'photo.fill', 'Photo'],
+                ['video', 'video.fill', 'Video'],
+                ['file', 'doc.fill', 'File'],
+              ].map(([kind, icon, label]) => (
+                <Pressable key={kind} style={styles.attachmentAction} onPress={() => void pickAndSendMedia(kind as 'photo' | 'video' | 'file')}>
+                  <SymbolView name={icon as any} size={23} tintColor={C.blue} />
+                  <Text style={styles.attachmentActionText}>{label}</Text>
+                </Pressable>
+              ))}
+            </View>
+          </BlurView>
+        </View>
+            )}
           </KeyboardAvoidingView>
         </SafeAreaView>
       </Modal>
@@ -1451,7 +1477,7 @@ function MediaTransferCard({ item }: { item: MediaTransferView }) {
       : item.state === 'outgoingComplete' ? 'Sent securely'
         : `${percent}% · ${done}/${total} chunks`;
   return (
-    <BlurView intensity={30} tint="dark" style={[styles.mediaBubble, mine ? styles.mediaMine : styles.mediaTheirs]}>
+    <BlurView intensity={30} tint={C === LIGHT_COLORS ? 'light' : 'dark'} style={[styles.mediaBubble, mine ? styles.mediaMine : styles.mediaTheirs]}>
       <Image source={GLASS_NOISE} resizeMode="repeat" style={styles.glassNoise} />
       {item.kind === 'photo' && item.localUri ? <Image source={{ uri: item.localUri }} style={styles.mediaPreview} resizeMode="cover" /> : (
         <View style={styles.mediaFileIcon}>
@@ -1522,13 +1548,15 @@ function LocalProfileAvatar({ profile, size = 72 }: { profile: LocalProfile; siz
   );
 }
 
-function PeerAvatar({ name, photoUri, trusted = false, size = 44 }: { name: string; photoUri?: string; trusted?: boolean; size?: number }) {
+function PeerAvatar({ name, photoUri, templateId, trusted = false, size = 44 }: { name: string; photoUri?: string; templateId?: string; trusted?: boolean; size?: number }) {
+  const template = AVATAR_TEMPLATES.find(item => item.id === templateId);
+  const source = template?.source ?? (photoUri ? { uri: photoUri } : undefined);
   return (
     <View style={[styles.avatarShell, { width: size, height: size, borderRadius: size / 2 }, trusted && styles.avatarTrusted]}>
-      {photoUri ? (
-        <Image source={{ uri: photoUri }} style={{ width: size, height: size, borderRadius: size / 2 }} />
+      {source ? (
+        <Image source={source} style={{ width: size, height: size, borderRadius: size / 2 }} resizeMode="cover" />
       ) : (
-        <SymbolView name={'person.crop.circle.fill' as any} size={Math.round(size * 0.72)} tintColor={trusted ? C.blue : '#7890AA'} />
+        <SymbolView name={'person.crop.circle.fill' as any} size={Math.round(size * 0.72)} tintColor={trusted ? C.blue : C.muted} />
       )}
     </View>
   );
@@ -1603,7 +1631,7 @@ function createStyles(C: ThemeColors) {
   pillRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginVertical: 18 },
   pill: { paddingHorizontal: 12, paddingVertical: 7, borderRadius: 99, backgroundColor: C.card2, borderWidth: 1, borderColor: '#2F86FF66' },
   pillText: { color: C.cyan, fontSize: 11, fontWeight: '700' },
-  card: { backgroundColor: C.card, borderRadius: 18, padding: 16, borderWidth: 1, borderColor: '#17304B' },
+  card: { backgroundColor: C.card, borderRadius: 18, padding: 16, borderWidth: 1, borderColor: C.line },
   profileCard: { flexDirection: 'row', alignItems: 'center', gap: 16 },
   profileCardBody: { flex: 1 },
   profileName: { color: C.text, fontSize: 19, fontWeight: '800' },
@@ -1622,8 +1650,8 @@ function createStyles(C: ThemeColors) {
   chatRow: { marginBottom: 10 },
   chatListMeta: { alignItems: 'flex-end', gap: 8, minWidth: 44 },
   listTime: { color: C.muted, fontSize: 10 },
-  unreadBadge: { minWidth: 22, height: 22, paddingHorizontal: 6, borderRadius: 11, backgroundColor: C.cyan, alignItems: 'center', justifyContent: 'center' },
-  unreadText: { color: C.ink, fontSize: 10, fontWeight: '900' },
+  unreadBadge: { minWidth: 22, height: 22, paddingHorizontal: 6, borderRadius: 11, backgroundColor: '#FF3B30', alignItems: 'center', justifyContent: 'center' },
+  unreadText: { color: '#FFF', fontSize: 10, fontWeight: '900' },
   cardTitle: { color: C.text, fontWeight: '700', fontSize: 16 },
   cardCopy: { color: C.muted, marginTop: 5, fontSize: 12, lineHeight: 17 },
   route: { color: C.cyan, fontSize: 10, fontWeight: '800', marginTop: 8, letterSpacing: 0.35 },
@@ -1631,11 +1659,11 @@ function createStyles(C: ThemeColors) {
   primaryText: { color: '#FFF', fontWeight: '800', fontSize: 15 },
   diagnostic: { marginTop: 16, backgroundColor: C.card2, borderRadius: 16, padding: 14 },
   cyanText: { color: C.cyan, fontWeight: '700', fontSize: 14 },
-  miniButton: { minWidth: 70, height: 36, borderRadius: 12, backgroundColor: '#18334F', alignItems: 'center', justifyContent: 'center', paddingHorizontal: 12 },
+  miniButton: { minWidth: 70, height: 36, borderRadius: 12, backgroundColor: C.card2, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 12 },
   miniButtonText: { color: C.text, fontWeight: '700', fontSize: 12 },
   peerList: { marginTop: 14 },
-  peerCard: { backgroundColor: C.card, borderRadius: 18, padding: 15, marginBottom: 10, flexDirection: 'row', alignItems: 'center', gap: 12, borderWidth: 1, borderColor: '#17304B' },
-  signalIcon: { width: 42, height: 42, borderRadius: 14, alignItems: 'center', justifyContent: 'center', backgroundColor: '#102B3A' },
+  peerCard: { backgroundColor: C.card, borderRadius: 18, padding: 15, marginBottom: 10, flexDirection: 'row', alignItems: 'center', gap: 12, borderWidth: 1, borderColor: C.line },
+  signalIcon: { width: 42, height: 42, borderRadius: 14, alignItems: 'center', justifyContent: 'center', backgroundColor: C.card2 },
   nearbyScreen: { flex: 1, backgroundColor: C.ink },
   nearbyHeader: { paddingHorizontal: 18, paddingTop: 12, paddingBottom: 8, flexDirection: 'row', alignItems: 'flex-start', gap: 14 },
   nearbyTitle: { color: C.text, fontSize: 30, fontWeight: '800' },
@@ -1643,14 +1671,14 @@ function createStyles(C: ThemeColors) {
   nearbyHeaderMeta: { color: '#6F86A0', fontSize: 10, marginTop: 5 },
   radioTextButton: { minWidth: 68, height: 36, borderRadius: 12, backgroundColor: C.card2, borderWidth: 1, borderColor: '#274765', alignItems: 'center', justifyContent: 'center', paddingHorizontal: 12 },
   radioTextButtonLabel: { color: C.blue, fontSize: 11, fontWeight: '800' },
-  nearbyModeSwitch: { marginHorizontal: 18, marginBottom: 10, padding: 3, borderRadius: 13, backgroundColor: '#0A1725', borderWidth: 1, borderColor: '#1C3148', flexDirection: 'row' },
+  nearbyModeSwitch: { marginHorizontal: 18, marginBottom: 10, padding: 3, borderRadius: 13, backgroundColor: themed(C, 'rgba(255,255,255,0.82)', '#0A1725'), borderWidth: 1, borderColor: C.line, flexDirection: 'row' },
   nearbyModeButton: { flex: 1, height: 36, borderRadius: 10, flexDirection: 'row', gap: 7, alignItems: 'center', justifyContent: 'center' },
   nearbyModeButtonActive: { backgroundColor: C.blue },
   nearbyModeText: { color: C.muted, fontSize: 12, fontWeight: '700' },
   nearbyModeTextActive: { color: '#FFF' },
   nearbyBody: { flex: 1, overflow: 'hidden', borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: C.line },
   nearbyList: { padding: 14, paddingBottom: 28 },
-  nearbyListRow: { minHeight: 76, padding: 13, marginBottom: 9, borderRadius: 16, backgroundColor: C.card, borderWidth: 1, borderColor: '#18314B', flexDirection: 'row', alignItems: 'center', gap: 12 },
+  nearbyListRow: { minHeight: 76, padding: 13, marginBottom: 9, borderRadius: 16, backgroundColor: C.card, borderWidth: 1, borderColor: C.line, flexDirection: 'row', alignItems: 'center', gap: 12 },
   nearbyPeerName: { color: C.text, fontSize: 15, fontWeight: '800', flexShrink: 1 },
   nearbyPeerRssi: { color: C.blue, fontSize: 10, fontWeight: '800' },
   nearbyPeerMeta: { color: C.muted, fontSize: 10, marginTop: 4 },
@@ -1665,38 +1693,38 @@ function createStyles(C: ThemeColors) {
   fieldPeer: { position: 'absolute', width: 112, minHeight: 70, alignItems: 'center', justifyContent: 'flex-start', paddingTop: 2, zIndex: 4 },
   fieldPeerLabel: { color: C.text, fontSize: 9, fontWeight: '700', marginTop: 4, maxWidth: 108, textAlign: 'center' },
   fieldPeerRssi: { color: '#7890AA', fontSize: 8, marginTop: 2 },
-  zoomRail: { position: 'absolute', right: 14, bottom: 18, gap: 7, zIndex: 20 },
-  zoomButton: { width: 40, height: 40, borderRadius: 12, alignItems: 'center', justifyContent: 'center', backgroundColor: '#0D1B2CDD', borderWidth: 1, borderColor: '#2A4663' },
+  zoomRail: { position: 'absolute', right: 14, bottom: 96, gap: 7, zIndex: 20 },
+  zoomButton: { width: 40, height: 40, borderRadius: 12, alignItems: 'center', justifyContent: 'center', backgroundColor: themed(C, 'rgba(255,255,255,0.88)', 'rgba(13,27,44,0.87)'), borderWidth: 1, borderColor: C.line },
   zoomText: { color: C.text, fontSize: 21, fontWeight: '500', marginTop: -2 },
-  nearbyEmpty: { position: 'absolute', left: 36, right: 36, top: '40%', alignItems: 'center', padding: 18, borderRadius: 16, backgroundColor: '#0D1B2CEB', borderWidth: 1, borderColor: '#223A53' },
+  nearbyEmpty: { position: 'absolute', left: 36, right: 36, top: '40%', alignItems: 'center', padding: 18, borderRadius: 16, backgroundColor: themed(C, 'rgba(255,255,255,0.92)', 'rgba(13,27,44,0.92)'), borderWidth: 1, borderColor: C.line },
   nearbyEmptyTitle: { color: C.text, fontSize: 14, fontWeight: '800' },
   nearbyEmptyCopy: { color: C.muted, fontSize: 10, textAlign: 'center', marginTop: 5 },
-  peerProfileSheet: { position: 'absolute', left: 10, right: 10, bottom: 10, padding: 18, paddingTop: 10, borderRadius: 22, backgroundColor: '#0B1828FA', borderWidth: 1, borderColor: '#294665', zIndex: 40 },
+  peerProfileSheet: { position: 'absolute', left: 10, right: 10, bottom: 94, padding: 18, paddingTop: 10, borderRadius: 22, backgroundColor: themed(C, 'rgba(255,255,255,0.97)', 'rgba(11,24,40,0.98)'), borderWidth: 1, borderColor: C.line, zIndex: 40 },
   peerProfileHandle: { width: 38, height: 4, borderRadius: 2, backgroundColor: '#40576E', alignSelf: 'center', marginBottom: 12 },
   peerProfileHeader: { flexDirection: 'row', alignItems: 'center', gap: 12 },
   peerProfileTitle: { color: C.text, fontSize: 20, fontWeight: '800', marginTop: 2 },
-  closeProfile: { width: 34, height: 34, borderRadius: 17, backgroundColor: '#14283C', alignItems: 'center', justifyContent: 'center' },
+  closeProfile: { width: 34, height: 34, borderRadius: 17, backgroundColor: C.glass, alignItems: 'center', justifyContent: 'center' },
   closeProfileText: { color: C.text, fontSize: 23, lineHeight: 26 },
   peerMetricsRow: { flexDirection: 'row', gap: 8, marginTop: 14 },
-  peerMetric: { flex: 1, minHeight: 58, borderRadius: 12, backgroundColor: '#102337', alignItems: 'center', justifyContent: 'center', paddingHorizontal: 6 },
+  peerMetric: { flex: 1, minHeight: 58, borderRadius: 12, backgroundColor: C.card2, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 6 },
   peerMetricValue: { color: C.text, fontSize: 13, fontWeight: '800', textAlign: 'center' },
   peerMetricLabel: { color: C.muted, fontSize: 8, marginTop: 3, textAlign: 'center' },
   peerProfileId: { color: '#7390AD', fontFamily: 'Menlo', fontSize: 9, marginTop: 13 },
   peerProfileMeta: { color: C.muted, fontSize: 10, marginTop: 3 },
   peerProfileAction: { minHeight: 48, borderRadius: 14, marginTop: 14, backgroundColor: C.blue, alignItems: 'center', justifyContent: 'center' },
   peerProfileActionText: { color: '#FFF', fontWeight: '800', fontSize: 13 },
-  avatarShell: { alignItems: 'center', justifyContent: 'center', backgroundColor: '#12243A', borderWidth: 1, borderColor: '#2A4058', overflow: 'hidden' },
+  avatarShell: { alignItems: 'center', justifyContent: 'center', backgroundColor: C.card2, borderWidth: 1, borderColor: C.line, overflow: 'hidden' },
   avatarTrusted: { borderColor: C.blue },
   testTransportLabel: { color: C.muted, fontSize: 10, fontWeight: '800', textTransform: 'uppercase', letterSpacing: 0.8, marginTop: 14, marginBottom: 7 },
-  testTransportSwitch: { flexDirection: 'row', padding: 3, borderRadius: 12, backgroundColor: '#0A1725', borderWidth: 1, borderColor: '#1C3148' },
+  testTransportSwitch: { flexDirection: 'row', padding: 3, borderRadius: 12, backgroundColor: C.card2, borderWidth: 1, borderColor: C.line },
   testTransportButton: { flex: 1, minHeight: 34, borderRadius: 9, alignItems: 'center', justifyContent: 'center' },
   testTransportButtonActive: { backgroundColor: C.blue },
   testTransportText: { color: C.muted, fontSize: 10, fontWeight: '800' },
   testTransportTextActive: { color: '#FFF' },
   mono: { color: '#67809E', fontSize: 10, marginTop: 5, fontFamily: 'Menlo' },
   link: { color: C.blue, fontWeight: '800', fontSize: 13 },
-  empty: { marginTop: 16, backgroundColor: C.card, borderRadius: 18, padding: 18, borderWidth: 1, borderColor: '#17304B' },
-  metric: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingVertical: 15, borderBottomColor: '#1B3047', borderBottomWidth: StyleSheet.hairlineWidth },
+  empty: { marginTop: 16, backgroundColor: C.card, borderRadius: 18, padding: 18, borderWidth: 1, borderColor: C.line },
+  metric: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingVertical: 15, borderBottomColor: C.line, borderBottomWidth: StyleSheet.hairlineWidth },
   metricLabel: { color: C.muted },
   metricValue: { color: C.cyan, fontWeight: '800', fontSize: 12 },
   reliabilityProgress: { color: C.cyan, fontSize: 11, fontWeight: '800', marginTop: 12 },
@@ -1710,9 +1738,9 @@ function createStyles(C: ThemeColors) {
   labButtonSecondaryText: { color: C.text, fontWeight: '700', fontSize: 12 },
   labFooter: { marginTop: 13, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
   section: { color: C.muted, fontWeight: '800', marginTop: 22, marginBottom: 8, textTransform: 'uppercase', fontSize: 11, letterSpacing: 1 },
-  transportCard: { marginTop: 10, minHeight: 76, padding: 14, borderRadius: 18, backgroundColor: C.card, borderWidth: 1, borderColor: '#17304B', flexDirection: 'row', alignItems: 'center', gap: 12 },
+  transportCard: { marginTop: 10, minHeight: 76, padding: 14, borderRadius: 18, backgroundColor: C.card, borderWidth: 1, borderColor: C.line, flexDirection: 'row', alignItems: 'center', gap: 12 },
   transportActive: { borderColor: '#2F86FF88' },
-  transportIcon: { width: 42, height: 42, borderRadius: 13, alignItems: 'center', justifyContent: 'center', backgroundColor: '#102337' },
+  transportIcon: { width: 42, height: 42, borderRadius: 13, alignItems: 'center', justifyContent: 'center', backgroundColor: C.card2 },
   transportStatus: { color: C.muted, fontSize: 10, fontWeight: '800' },
   transportStatusActive: { color: C.cyan },
   sosPanel: { marginTop: 22, padding: 22, alignItems: 'center', backgroundColor: C.card, borderRadius: 24, borderWidth: 1, borderColor: '#5B2430' },
@@ -1722,8 +1750,8 @@ function createStyles(C: ThemeColors) {
   nav: { position: 'absolute', left: 14, right: 14, bottom: 10, height: 72, paddingHorizontal: 5, paddingVertical: 5, flexDirection: 'row', backgroundColor: C.glassStrong, borderWidth: 1, borderColor: C.line, borderRadius: 25, shadowColor: '#000', shadowOpacity: 0.28, shadowRadius: 18, shadowOffset: { width: 0, height: 8 }, elevation: 14 },
   navItem: { flex: 1, minHeight: 58, borderRadius: 20, alignItems: 'center', justifyContent: 'center', gap: 3 },
   navIconWrap: { position: 'relative', minWidth: 30, alignItems: 'center' },
-  navBadge: { position: 'absolute', top: -7, right: -9, minWidth: 18, height: 18, paddingHorizontal: 4, borderRadius: 9, backgroundColor: C.cyan, alignItems: 'center', justifyContent: 'center' },
-  navBadgeText: { color: C.ink, fontSize: 9, fontWeight: '900' },
+  navBadge: { position: 'absolute', top: -7, right: -9, minWidth: 18, height: 18, paddingHorizontal: 4, borderRadius: 9, backgroundColor: '#FF3B30', alignItems: 'center', justifyContent: 'center' },
+  navBadgeText: { color: '#FFF', fontSize: 9, fontWeight: '900' },
   navText: { color: C.muted, fontSize: 12, fontWeight: '600' },
   navActive: { color: C.cyan, fontWeight: '800' },
   backdrop: { flex: 1, backgroundColor: '#000A', justifyContent: 'flex-end' },
@@ -1731,10 +1759,10 @@ function createStyles(C: ThemeColors) {
   profileSheet: { maxHeight: '92%', backgroundColor: C.card, padding: 20, paddingBottom: 26, borderTopLeftRadius: 28, borderTopRightRadius: 28 },
   profileEditorScroll: { paddingBottom: 18 },
   profilePreview: { alignItems: 'center', marginTop: 22, marginBottom: 8 },
-  uploadPhotoButton: { marginTop: 12, minHeight: 38, borderRadius: 12, backgroundColor: '#183A5D', paddingHorizontal: 14, flexDirection: 'row', alignItems: 'center', gap: 8 },
+  uploadPhotoButton: { marginTop: 12, minHeight: 38, borderRadius: 12, backgroundColor: C.blue, paddingHorizontal: 14, flexDirection: 'row', alignItems: 'center', gap: 8 },
   uploadPhotoText: { color: '#FFF', fontWeight: '800', fontSize: 12 },
   fieldLabel: { color: C.muted, fontWeight: '800', fontSize: 10, textTransform: 'uppercase', letterSpacing: 0.8, marginTop: 16, marginBottom: 7 },
-  profileInput: { minHeight: 48, borderRadius: 14, borderWidth: 1, borderColor: '#28445F', backgroundColor: '#0A1725', color: C.text, paddingHorizontal: 14, fontSize: 14 },
+  profileInput: { minHeight: 48, borderRadius: 14, borderWidth: 1, borderColor: C.line, backgroundColor: C.card2, color: C.text, paddingHorizontal: 14, fontSize: 14 },
   profileAboutInput: { minHeight: 82, paddingTop: 13, textAlignVertical: 'top' },
   avatarTemplateGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 10 },
   avatarTemplateButton: { width: '30%', aspectRatio: 1, borderRadius: 18, overflow: 'hidden', borderWidth: 2, borderColor: '#203A55', position: 'relative' },
@@ -1754,34 +1782,34 @@ function createStyles(C: ThemeColors) {
   chatPeerName: { color: C.text, fontSize: 15, fontWeight: '800' },
   chatPeerRoute: { color: C.cyan, fontSize: 8, fontWeight: '800', letterSpacing: 0.7, marginTop: 2 },
   headerSpacer: { width: 42 },
-  offlineBanner: { marginHorizontal: 12, marginTop: 10, paddingHorizontal: 13, paddingVertical: 11, borderRadius: 15, flexDirection: 'row', alignItems: 'center', gap: 10, backgroundColor: '#102337', borderWidth: 1, borderColor: '#2F86FF88' },
+  offlineBanner: { marginHorizontal: 12, marginTop: 10, paddingHorizontal: 13, paddingVertical: 11, borderRadius: 15, flexDirection: 'row', alignItems: 'center', gap: 10, backgroundColor: C.card2, borderWidth: 1, borderColor: '#2F86FF88' },
   offlineBannerTitle: { color: C.text, fontSize: 12, fontWeight: '800' },
   offlineBannerCopy: { color: C.muted, fontSize: 11, lineHeight: 15, marginTop: 2 },
   messages: { padding: 16, paddingBottom: 22, gap: 10 },
   messageRow: { width: '100%', flexDirection: 'row', alignItems: 'flex-end' },
   messageRowMine: { justifyContent: 'flex-end' },
   messageRowTheirs: { justifyContent: 'flex-start', gap: 8 },
-  bubbleWrap: { maxWidth: '82%', position: 'relative' },
-  bubble: { paddingHorizontal: 14, paddingVertical: 11, borderRadius: 18, overflow: 'hidden', borderWidth: 1, borderColor: C.line, zIndex: 2 },
+  bubbleWrap: { maxWidth: '82%', position: 'relative', shadowColor: '#000', shadowOpacity: C === LIGHT_COLORS ? 0.10 : 0.28, shadowRadius: 7, shadowOffset: { width: 0, height: 3 }, elevation: 3 },
+  bubble: { paddingHorizontal: 14, paddingVertical: 11, borderRadius: 18, overflow: 'hidden', borderWidth: 1, borderColor: themed(C, 'rgba(167,185,204,0.72)', 'rgba(90,126,164,0.42)'), zIndex: 2 },
   bubbleTail: { position: 'absolute', bottom: 10, width: 14, height: 14, transform: [{ rotate: '45deg' }], borderWidth: 1, borderColor: C.line, zIndex: 1 },
   bubbleTailMine: { right: -4, backgroundColor: resolvedMineGlass(C) },
   bubbleTailTheirs: { left: -4, backgroundColor: C.glass },
   mine: { backgroundColor: resolvedMineGlass(C) },
-  theirs: { backgroundColor: C.glass },
+  theirs: { backgroundColor: themed(C, 'rgba(255,255,255,0.62)', 'rgba(21,39,59,0.50)') },
   bubbleText: { color: C.text, fontSize: 16, lineHeight: 21 },
   bubbleMeta: { marginTop: 6, flexDirection: 'row', alignItems: 'center', justifyContent: 'flex-end', gap: 8 },
   receipt: { color: '#BBD5F2', fontSize: 10, flexShrink: 1 },
   timestamp: { color: '#8FA9C5', fontSize: 10 },
   mediaTransferList: { gap: 10, paddingTop: 4 },
   mediaBubble: { maxWidth: '88%', minWidth: 230, borderRadius: 18, padding: 10, flexDirection: 'row', gap: 10, borderWidth: 1 },
-  mediaMine: { alignSelf: 'flex-end', backgroundColor: '#102C4B', borderColor: '#2F86FF66' },
-  mediaTheirs: { alignSelf: 'flex-start', backgroundColor: C.card2, borderColor: '#29435E' },
-  mediaPreview: { width: 76, height: 76, borderRadius: 12, backgroundColor: '#091522' },
-  mediaFileIcon: { width: 76, height: 76, borderRadius: 12, backgroundColor: '#0A1725', alignItems: 'center', justifyContent: 'center' },
+  mediaMine: { alignSelf: 'flex-end', backgroundColor: resolvedMineGlass(C), borderColor: '#2F86FF66' },
+  mediaTheirs: { alignSelf: 'flex-start', backgroundColor: C.card2, borderColor: C.line },
+  mediaPreview: { width: 76, height: 76, borderRadius: 12, backgroundColor: C.card2 },
+  mediaFileIcon: { width: 76, height: 76, borderRadius: 12, backgroundColor: C.card2, alignItems: 'center', justifyContent: 'center' },
   mediaInfo: { flex: 1, minWidth: 0, justifyContent: 'center' },
   mediaFileName: { color: C.text, fontSize: 13, fontWeight: '800' },
   mediaMeta: { color: C.muted, fontSize: 9, marginTop: 4 },
-  mediaProgressTrack: { height: 4, borderRadius: 3, backgroundColor: '#203247', overflow: 'hidden', marginTop: 9 },
+  mediaProgressTrack: { height: 4, borderRadius: 3, backgroundColor: C.line, overflow: 'hidden', marginTop: 9 },
   mediaProgressFill: { height: 4, borderRadius: 3, backgroundColor: C.blue },
   mediaStatus: { color: C.cyan, fontSize: 9, fontWeight: '700', marginTop: 6 },
   attachButton: { width: 48, height: 48, borderRadius: 16, backgroundColor: C.glass, borderWidth: 1, borderColor: C.line, alignItems: 'center', justifyContent: 'center' },
@@ -1789,7 +1817,7 @@ function createStyles(C: ThemeColors) {
   input: { flex: 1, height: 48, backgroundColor: C.glass, color: C.text, borderRadius: 16, borderWidth: 1, borderColor: C.line, paddingHorizontal: 16, paddingTop: 12, paddingBottom: 12, fontSize: 16 },
   glassNoise: { position: 'absolute', left: 0, right: 0, top: 0, bottom: 0, width: '100%', height: '100%', opacity: 0.12 },
   glassNoiseStrong: { position: 'absolute', left: 0, right: 0, top: 0, bottom: 0, width: '100%', height: '100%', opacity: 0.17 },
-  attachmentBackdrop: { flex: 1, backgroundColor: 'rgba(0,0,0,0.42)', justifyContent: 'flex-end', padding: 14, paddingBottom: 28, position: 'relative' },
+  attachmentBackdrop: { position: 'absolute', left: 0, right: 0, top: 0, bottom: 0, backgroundColor: themed(C, 'rgba(20,30,42,0.18)', 'rgba(0,0,0,0.42)'), justifyContent: 'flex-end', padding: 14, paddingBottom: 22, zIndex: 90 },
   attachmentDismissLayer: { position: 'absolute', left: 0, right: 0, top: 0, bottom: 0 },
   attachmentSheet: { borderRadius: 26, padding: 18, overflow: 'hidden', borderWidth: 1, borderColor: C.line, backgroundColor: C.glassStrong },
   attachmentTitle: { color: C.text, fontSize: 18, fontWeight: '800' },
@@ -1800,6 +1828,10 @@ function createStyles(C: ThemeColors) {
   send: { width: 48, height: 48, borderRadius: 24, backgroundColor: C.blue, alignItems: 'center', justifyContent: 'center' },
   sendDisabled: { opacity: 0.38 },
   });
+}
+
+function themed(colors: ThemeColors, light: string, dark: string) {
+  return colors === LIGHT_COLORS ? light : dark;
 }
 
 function resolvedGridColor(colors: ThemeColors) {

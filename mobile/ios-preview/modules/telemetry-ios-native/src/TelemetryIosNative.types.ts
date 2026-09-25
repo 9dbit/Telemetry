@@ -30,6 +30,8 @@ export type Contact = {
   updatedAt: number;
   unreadCount?: number;
   profilePhotoUri?: string;
+  profileDisplayName?: string;
+  profileTemplateId?: string;
 };
 
 export type PersistedMessage = {
@@ -67,6 +69,13 @@ export type VerificationEvent = {
 export type TrustedEvent = {
   peerId: string;
   deviceId: string;
+};
+
+export type ProfileEvent = {
+  peerId: string;
+  deviceId: string;
+  displayName?: string;
+  templateId?: string;
 };
 
 export type MessageEvent = {
