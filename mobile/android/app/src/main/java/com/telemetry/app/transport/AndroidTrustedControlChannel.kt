@@ -33,28 +33,33 @@ class AndroidTrustedControlChannel(
 
     fun open(bytes: ByteArray): NativeOpenedControlEnvelope {
         val envelope = codec.decode(bytes)
-        val peer = trustStore.get(envelope.senderId) ?: error("control sender is not trusted")
-        val key = AndroidPersistentPeerKey.derive(identity, peer.exchangePublicKey)
-        return codec.verifyAndOpen(
-            bytes = bytes,
-            sessionKey = key,
-            signingPublicKey = peer.signingPublicKey,
-            expectedRecipientId = identity.deviceId
-        )
+        return if (envelope.senderId == identity.deviceId) {
+            val peer = trustStore.get(envelope.recipientId) ?: error("outgoing control peer is not trusted")
+            val key = AndroidPersistentPeerKey.derive(identity, peer.exchangePublicKey)
+            codec.verifyAndOpen(
+                bytes = bytes,
+                sessionKey = key,
+                signingPublicKey = identity.signingPublicKey,
+                expectedRecipientId = peer.deviceId
+            )
+        } else {
+            require(envelope.recipientId == identity.deviceId) { "control recipient mismatch" }
+            val peer = trustStore.get(envelope.senderId) ?: error("control sender is not trusted")
+            val key = AndroidPersistentPeerKey.derive(identity, peer.exchangePublicKey)
+            codec.verifyAndOpen(
+                bytes = bytes,
+                sessionKey = key,
+                signingPublicKey = peer.signingPublicKey,
+                expectedRecipientId = identity.deviceId
+            )
+        }
     }
 
     fun openOwnForPeer(bytes: ByteArray, peerDeviceId: String): NativeOpenedControlEnvelope {
         val envelope = codec.decode(bytes)
         require(envelope.senderId == identity.deviceId) { "outgoing control sender mismatch" }
         require(envelope.recipientId == peerDeviceId) { "outgoing control recipient mismatch" }
-        val peer = trustStore.get(peerDeviceId) ?: error("outgoing control peer is not trusted")
-        val key = AndroidPersistentPeerKey.derive(identity, peer.exchangePublicKey)
-        return codec.verifyAndOpen(
-            bytes = bytes,
-            sessionKey = key,
-            signingPublicKey = identity.signingPublicKey,
-            expectedRecipientId = peerDeviceId
-        )
+        return open(bytes)
     }
 
     fun decode(bytes: ByteArray): NativeSignedControlEnvelope = codec.decode(bytes)
