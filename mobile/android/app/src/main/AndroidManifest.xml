@@ -45,6 +45,11 @@
             android:exported="false" />
 
         <activity
+            android:name=".mesh.MeshLabActivity"
+            android:exported="false"
+            android:label="Telemetry Mesh Lab" />
+
+        <activity
             android:name=".update.UpdateGateActivity"
             android:exported="true"
             android:label="Telemetry Preview">
