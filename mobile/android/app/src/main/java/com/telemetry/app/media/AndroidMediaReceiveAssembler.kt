@@ -2,6 +2,7 @@ package com.telemetry.app.media
 
 import java.io.File
 import java.io.FileOutputStream
+import java.nio.file.Files
 import java.security.MessageDigest
 
 data class NativeMediaReceiveProgress(
@@ -32,7 +33,7 @@ class AndroidMediaReceiveAssembler(
     }
 
     fun verifyComplete(manifest: NativeMediaManifest, nowEpochMs: Long): Boolean = runCatching {
-        val tempRoot = createTempDir(prefix = "telemetry-media-verify-")
+        val tempRoot = Files.createTempDirectory("telemetry-media-verify-").toFile()
         try {
             materializeToCache(manifest, nowEpochMs, tempRoot).delete()
             true
