@@ -4,6 +4,11 @@ permissions:
   contents: write
 
 on:
+  pull_request:
+    paths:
+      - "mobile/android/**"
+      - ".github/workflows/android-release.yml"
+      - "update-controller/**"
   workflow_dispatch:
     inputs:
       release_notes:
@@ -22,11 +27,14 @@ on:
         type: string
 
 jobs:
-  promote-preview:
+  build-release-candidate:
     runs-on: ubuntu-latest
     env:
       CHANNEL: preview
       PACKAGE_NAME: com.telemetry.preview
+      RELEASE_NOTES: ${{ inputs.release_notes || 'CI candidate validation only' }}
+      MANDATORY: ${{ inputs.mandatory || false }}
+      MINIMUM_VERSION_CODE: ${{ inputs.minimum_version_code || '0' }}
     steps:
       - uses: actions/checkout@v4
 
@@ -55,15 +63,10 @@ jobs:
 
       - name: Verify APK identity and generate release manifest
         shell: bash
-        env:
-          RELEASE_NOTES: ${{ inputs.release_notes }}
-          MANDATORY: ${{ inputs.mandatory }}
-          MINIMUM_VERSION_CODE: ${{ inputs.minimum_version_code }}
         run: |
           set -euo pipefail
           APK_SRC="mobile/android/app/build/outputs/apk/debug/app-debug.apk"
           APK_OUT="Telemetry-Android-Preview.apk"
-          MANIFEST_OUT="telemetry-android-preview-manifest.json"
           cp "$APK_SRC" "$APK_OUT"
 
           APKSIGNER="$(find "$ANDROID_HOME/build-tools" -type f -name apksigner | sort -V | tail -n 1)"
@@ -76,6 +79,7 @@ jobs:
           SIZE_BYTES="$(stat -c%s "$APK_OUT")"
           PUBLISHED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           APK_URL="https://github.com/${GITHUB_REPOSITORY}/releases/download/${RELEASE_TAG}/${APK_OUT}"
+          export CERT_SHA256 SHA256 SIZE_BYTES PUBLISHED_AT APK_URL
 
           python3 - <<'PY'
           import json, os
@@ -103,25 +107,11 @@ jobs:
               json.dump(manifest, f, indent=2, sort_keys=True)
               f.write('\n')
           PY
-        env:
-          RELEASE_NOTES: ${{ inputs.release_notes }}
-          MANDATORY: ${{ inputs.mandatory }}
-          MINIMUM_VERSION_CODE: ${{ inputs.minimum_version_code }}
-          CHANNEL: preview
-          PACKAGE_NAME: com.telemetry.preview
-          TELEMETRY_VERSION_CODE: ${{ env.TELEMETRY_VERSION_CODE }}
-          TELEMETRY_VERSION_NAME: ${{ env.TELEMETRY_VERSION_NAME }}
-          RELEASE_TAG: ${{ env.RELEASE_TAG }}
-          PUBLISHED_AT: ${{ env.PUBLISHED_AT }}
-          APK_URL: ${{ env.APK_URL }}
-          SHA256: ${{ env.SHA256 }}
-          SIZE_BYTES: ${{ env.SIZE_BYTES }}
-          CERT_SHA256: ${{ env.CERT_SHA256 }}
 
       - name: Publish explicitly promoted preview release
+        if: github.event_name == 'workflow_dispatch'
         env:
           GH_TOKEN: ${{ github.token }}
-          RELEASE_NOTES: ${{ inputs.release_notes }}
         shell: bash
         run: |
           set -euo pipefail
@@ -144,10 +134,10 @@ jobs:
             --notes "$NOTES" \
             --latest
 
-      - name: Upload auditable release evidence
+      - name: Upload auditable candidate evidence
         uses: actions/upload-artifact@v4
         with:
-          name: telemetry-android-promoted-${{ env.TELEMETRY_VERSION_CODE }}
+          name: telemetry-android-release-candidate-${{ env.TELEMETRY_VERSION_CODE }}
           path: |
             Telemetry-Android-Preview.apk
             telemetry-android-preview-manifest.json
