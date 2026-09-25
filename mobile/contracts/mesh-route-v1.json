@@ -1,0 +1,55 @@
+{
+  "version": "telemetry-mesh-route-mobile/1",
+  "wireProtocol": "telemetry/mesh-route/0.1",
+  "purpose": "Cross-platform mobile contract for signed, privacy-minimal mesh route advertisements.",
+  "identity": {
+    "signature": "Ed25519",
+    "advertiserIdBoundToSigningKey": true,
+    "sequence": "monotonic-per-advertiser"
+  },
+  "limits": {
+    "defaultTtlMs": 15000,
+    "maxTtlMs": 30000,
+    "maxRoutes": 32,
+    "maxCapabilities": 16,
+    "maxCapabilityChars": 64,
+    "maxLearnedHops": 32
+  },
+  "signedFields": [
+    "protocol",
+    "advertiserId",
+    "sequence",
+    "createdAt",
+    "expiresAt",
+    "capabilities",
+    "routes"
+  ],
+  "routeFields": [
+    "destinationId",
+    "hops",
+    "quality",
+    "transport"
+  ],
+  "rules": {
+    "splitHorizon": true,
+    "rejectExpired": true,
+    "rejectStaleSequence": true,
+    "rejectIdentityMismatch": true,
+    "rejectBadSignature": true,
+    "qualityRange": [-100, 100],
+    "advertisedHopRange": [0, 31],
+    "selfRouteTransport": "self",
+    "learnedSelfTransportBecomesIngressTransport": true
+  },
+  "privacy": {
+    "gpsRequired": false,
+    "preciseLocationAllowed": false,
+    "payloadAllowed": false,
+    "ciphertextAllowed": false,
+    "plaintextAllowed": false
+  },
+  "mobileBoundary": {
+    "nativeMayPublish": ["deviceId", "capabilities", "reachableRoutes", "linkQuality", "linkTransport"],
+    "nativeMustNotPublish": ["plaintext", "ciphertext", "messageBody", "gpsCoordinates"]
+  }
+}

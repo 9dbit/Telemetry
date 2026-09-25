@@ -32,8 +32,10 @@ if (!headerAffected && !swiftAffected) {
   console.log(`[telemetry] expo-modules-jsi ${version}: upstream compatibility fix detected; no patch needed`);
   process.exit(0);
 }
-if (version !== "57.1.0") {
-  throw new Error(`expo-modules-jsi ${version} is affected, but this patch is verified only for 57.1.0`);
+
+const verifiedAffectedVersions = new Set(["57.1.0", "57.1.1"]);
+if (!verifiedAffectedVersions.has(version)) {
+  throw new Error(`expo-modules-jsi ${version} is affected, but this patch is verified only for ${[...verifiedAffectedVersions].join(", ")}`);
 }
 
 if (headerAffected) {

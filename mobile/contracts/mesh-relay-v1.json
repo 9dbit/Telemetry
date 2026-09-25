@@ -1,0 +1,62 @@
+{
+  "version": "telemetry-mesh-relay/1",
+  "milestone": "M1.4E-native-multihop-prep",
+  "principles": {
+    "relayPayloadVisibility": "opaque",
+    "relayMayDecryptPayload": false,
+    "stableMessageIdAcrossHops": true,
+    "senderSignatureImmutableAcrossHops": true,
+    "finalRecipientSignsReceipt": true,
+    "transportSpecificSecurityPipeline": false
+  },
+  "relayFrame": {
+    "required": ["messageId", "envelope", "relayPath", "createdAt", "expiresAt"],
+    "immutableAcrossRelay": [
+      "messageId",
+      "envelope.messageId",
+      "envelope.senderId",
+      "envelope.recipientId",
+      "envelope.createdAt",
+      "envelope.contentType",
+      "envelope.payload",
+      "envelope.signature"
+    ],
+    "relayMutable": ["envelope.hopCount", "relayPath", "lastForwardedAt"],
+    "maxHopLimit": 32,
+    "duplicateKey": "messageId",
+    "expiryRequired": true
+  },
+  "routeAdvertisement": {
+    "signed": true,
+    "identityBound": true,
+    "monotonicSequence": true,
+    "splitHorizon": true,
+    "maxRoutes": 32,
+    "maxTtlMs": 30000
+  },
+  "relayStore": {
+    "payload": "ciphertext-only",
+    "states": ["stored", "inflight", "retry"],
+    "storeAndForward": true,
+    "duplicateStorage": false,
+    "expiryPruning": true
+  },
+  "transport": {
+    "controlDiscovery": ["ble"],
+    "dataCandidates": ["wifi", "ble"],
+    "selectionOwnedBy": "TransportCoordinator",
+    "messageIdChangesOnFallback": false
+  },
+  "diagnostics": [
+    "relayFrameAccepted",
+    "relayDuplicateSuppressed",
+    "relayStored",
+    "relayForwarded",
+    "relayExpired",
+    "relayLoopRejected",
+    "relayHopLimitRejected",
+    "routeAdvertisementAccepted",
+    "routeAdvertisementRejected",
+    "finalReceiptAccepted"
+  ]
+}

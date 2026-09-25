@@ -1,0 +1,35 @@
+{
+  "version": "telemetry-mesh-route-wire/1",
+  "magicAscii": "TMA1",
+  "byteOrder": "big-endian",
+  "signedCanonical": "telemetry-mesh-route-mobile/1 canonical JSON",
+  "limits": {
+    "maxStringUtf8Bytes": 512,
+    "maxCapabilities": 16,
+    "maxRoutes": 32,
+    "signatureBytes": 64
+  },
+  "fields": [
+    { "name": "magic", "type": "bytes", "length": 4 },
+    { "name": "advertiserId", "type": "utf8", "lengthPrefix": "u16" },
+    { "name": "sequence", "type": "i64" },
+    { "name": "createdAtEpochMs", "type": "i64" },
+    { "name": "expiresAtEpochMs", "type": "i64" },
+    { "name": "capabilityCount", "type": "u8" },
+    { "name": "capabilities", "type": "utf8[]", "entryLengthPrefix": "u16" },
+    { "name": "routeCount", "type": "u8" },
+    { "name": "routes.destinationId", "type": "utf8", "lengthPrefix": "u16" },
+    { "name": "routes.hops", "type": "u8" },
+    { "name": "routes.quality", "type": "i16" },
+    { "name": "routes.transport", "type": "utf8", "lengthPrefix": "u16" },
+    { "name": "signature", "type": "bytes", "length": 64 }
+  ],
+  "rules": {
+    "verifySignatureBeforeRouteIngest": true,
+    "advertiserIdBoundToRawEd25519PublicKey": true,
+    "rejectTrailingBytes": true,
+    "rejectExpired": true,
+    "rejectStaleSequenceInRuntime": true,
+    "gpsCoordinatesAllowed": false
+  }
+}

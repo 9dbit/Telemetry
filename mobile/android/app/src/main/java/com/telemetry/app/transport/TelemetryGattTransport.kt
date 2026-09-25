@@ -16,10 +16,10 @@ import android.content.pm.PackageManager
 import android.os.Build
 import com.telemetry.app.crypto.AndroidTrustStore
 import com.telemetry.app.crypto.DeviceIdentity
-import com.telemetry.app.crypto.EncryptedMessage
 import com.telemetry.app.crypto.EphemeralKeyPair
 import com.telemetry.app.crypto.SessionHello
 import com.telemetry.app.crypto.TelemetryCrypto
+import com.telemetry.app.mesh.AndroidMeshWireEndpoint
 import java.util.LinkedHashMap
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
@@ -77,7 +77,10 @@ class TelemetryGattTransport(
         val HELLO_UUID: UUID = UUID.fromString("f0a0c0de-7e1e-4e7f-9a11-54454c454d01")
         val MESSAGE_UUID: UUID = UUID.fromString("f0a0c0de-7e1e-4e7f-9a11-54454c454d02")
         val RECEIPT_UUID: UUID = UUID.fromString("f0a0c0de-7e1e-4e7f-9a11-54454c454d03")
+        val MESH_RELAY_UUID: UUID = UUID.fromString("f0a0c0de-7e1e-4e7f-9a11-54454c454d04")
+        val MESH_ROUTE_UUID: UUID = UUID.fromString("f0a0c0de-7e1e-4e7f-9a11-54454c454d05")
         const val MAX_TEXT_BYTES = 160
+        const val MAX_MESH_GATT_WIRE_BYTES = 480
     }
 
     private val manager = context.getSystemService(BluetoothManager::class.java)
@@ -86,6 +89,11 @@ class TelemetryGattTransport(
     private val receipts = ConcurrentHashMap<String, ByteArray>()
     private val replay = ReplayWindow()
     private var server: BluetoothGattServer? = null
+    private var meshEndpoint: AndroidMeshWireEndpoint? = null
+
+    fun attachMeshEndpoint(endpoint: AndroidMeshWireEndpoint) {
+        meshEndpoint = endpoint
+    }
 
     private val serverCallback = object : BluetoothGattServerCallback() {
         override fun onConnectionStateChange(device: BluetoothDevice, status: Int, newState: Int) {
@@ -127,6 +135,8 @@ class TelemetryGattTransport(
             val ok = when (characteristic.uuid) {
                 HELLO_UUID -> acceptHello(device.address, value)
                 MESSAGE_UUID -> acceptMessage(device.address, value)
+                MESH_RELAY_UUID -> !preparedWrite && offset == 0 && acceptMeshRelay(device.address, value)
+                MESH_ROUTE_UUID -> !preparedWrite && offset == 0 && acceptMeshRoute(device.address, value)
                 else -> false
             }
             if (responseNeeded) {
@@ -251,6 +261,20 @@ class TelemetryGattTransport(
                 BluetoothGattCharacteristic.PERMISSION_READ
             )
         )
+        service.addCharacteristic(
+            BluetoothGattCharacteristic(
+                MESH_RELAY_UUID,
+                BluetoothGattCharacteristic.PROPERTY_WRITE,
+                BluetoothGattCharacteristic.PERMISSION_WRITE
+            )
+        )
+        service.addCharacteristic(
+            BluetoothGattCharacteristic(
+                MESH_ROUTE_UUID,
+                BluetoothGattCharacteristic.PROPERTY_WRITE,
+                BluetoothGattCharacteristic.PERMISSION_WRITE
+            )
+        )
         opened.addService(service)
         server = opened
     }
@@ -289,6 +313,36 @@ class TelemetryGattTransport(
         trustStore.verify(hello)
         onEvent(SecureTransportEvent.SessionTrusted(entry.address, hello.deviceId))
         return true
+    }
+
+    fun isMeshPeerAvailable(peerDeviceId: String): Boolean {
+        val session = sessions.values.firstOrNull { it.remoteHello?.deviceId == peerDeviceId } ?: return false
+        val remote = session.remoteHello ?: return false
+        if (!trustStore.isVerified(remote)) return false
+        val gatt = clientGatts[session.address] ?: return false
+        val service = gatt.getService(SERVICE_UUID) ?: return false
+        return service.getCharacteristic(MESH_RELAY_UUID) != null && service.getCharacteristic(MESH_ROUTE_UUID) != null
+    }
+
+    @SuppressLint("MissingPermission")
+    fun sendMeshRelayWire(peerDeviceId: String, wire: ByteArray): Boolean =
+        sendMeshWire(peerDeviceId, MESH_RELAY_UUID, wire)
+
+    @SuppressLint("MissingPermission")
+    fun sendMeshRouteWire(peerDeviceId: String, wire: ByteArray): Boolean =
+        sendMeshWire(peerDeviceId, MESH_ROUTE_UUID, wire)
+
+    @SuppressLint("MissingPermission")
+    private fun sendMeshWire(peerDeviceId: String, characteristicUuid: UUID, wire: ByteArray): Boolean {
+        if (wire.isEmpty() || wire.size > MAX_MESH_GATT_WIRE_BYTES) return false
+        val session = sessions.values.firstOrNull { it.remoteHello?.deviceId == peerDeviceId } ?: return false
+        val remote = session.remoteHello ?: return false
+        if (!trustStore.isVerified(remote)) return false
+        val gatt = clientGatts[session.address] ?: return false
+        val characteristic = gatt.getService(SERVICE_UUID)?.getCharacteristic(characteristicUuid) ?: return false
+        characteristic.writeType = BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
+        characteristic.value = wire
+        return gatt.writeCharacteristic(characteristic)
     }
 
     @SuppressLint("MissingPermission")
@@ -364,6 +418,44 @@ class TelemetryGattTransport(
     }.getOrElse {
         onEvent(SecureTransportEvent.Error("Encrypted message rejected: ${it.message}"))
         false
+    }
+
+    private fun acceptMeshRelay(address: String, wire: ByteArray): Boolean = runCatching {
+        require(wire.isNotEmpty() && wire.size <= MAX_MESH_GATT_WIRE_BYTES) { "mesh relay wire exceeds BLE limit" }
+        val endpoint = meshEndpoint ?: error("mesh endpoint unavailable")
+        val remote = trustedRemote(address)
+        require(remote.deviceId != identity.deviceId) { "self relay rejected" }
+        endpoint.ingestRelayWire(wire, System.currentTimeMillis()) ?: error("mesh relay frame rejected")
+        true
+    }.getOrElse {
+        false
+    }
+
+    private fun acceptMeshRoute(address: String, wire: ByteArray): Boolean = runCatching {
+        require(wire.isNotEmpty() && wire.size <= MAX_MESH_GATT_WIRE_BYTES) { "mesh route wire exceeds BLE limit" }
+        val endpoint = meshEndpoint ?: error("mesh endpoint unavailable")
+        val remote = trustedRemote(address)
+        val now = System.currentTimeMillis()
+        val accepted = endpoint.ingestRouteWire(
+            bytes = wire,
+            fromPeerId = remote.deviceId,
+            signingPublicKey = remote.signingPublicKey,
+            linkQuality = 0,
+            linkTransport = "ble",
+            nowEpochMs = now
+        )
+        if (accepted > 0) endpoint.flush(now)
+        accepted > 0
+    }.getOrElse {
+        false
+    }
+
+    private fun trustedRemote(address: String): SessionHello {
+        val session = sessions[address] ?: error("unknown peer session")
+        val remote = session.remoteHello ?: error("peer identity not established")
+        require(session.sessionKey != null) { "session key unavailable" }
+        require(trustStore.isVerified(remote)) { "peer is not trusted" }
+        return remote
     }
 
     private fun acceptReceipt(address: String, frame: ByteArray): Boolean = runCatching {
