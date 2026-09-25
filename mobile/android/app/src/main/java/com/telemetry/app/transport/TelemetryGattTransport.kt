@@ -34,7 +34,6 @@ sealed interface SecureTransportEvent {
     data class SessionTrusted(val address: String, val deviceId: String) : SecureTransportEvent
     data class MessageReceived(val address: String, val deviceId: String, val text: String) : SecureTransportEvent
     data class DeliveryConfirmed(val address: String, val messageId: String) : SecureTransportEvent
-    data class MeshRouteUpdated(val deviceId: String, val acceptedRoutes: Int) : SecureTransportEvent
     data class Disconnected(val address: String) : SecureTransportEvent
     data class Error(val message: String) : SecureTransportEvent
 }
@@ -93,9 +92,14 @@ class TelemetryGattTransport(
     private val controlCodec = AndroidControlEnvelopeCodec(identity)
     private var server: BluetoothGattServer? = null
     private var meshEndpoint: AndroidMeshWireEndpoint? = null
+    private var meshRouteListener: ((String, Int) -> Unit)? = null
 
     fun attachMeshEndpoint(endpoint: AndroidMeshWireEndpoint) {
         meshEndpoint = endpoint
+    }
+
+    fun setMeshRouteListener(listener: ((String, Int) -> Unit)?) {
+        meshRouteListener = listener
     }
 
     private val serverCallback = object : BluetoothGattServerCallback() {
@@ -513,7 +517,7 @@ class TelemetryGattTransport(
         )
         if (accepted > 0) {
             endpoint.flush(now)
-            onEvent(SecureTransportEvent.MeshRouteUpdated(remote.deviceId, accepted))
+            meshRouteListener?.invoke(remote.deviceId, accepted)
         }
         accepted > 0
     }.getOrElse {
