@@ -71,9 +71,14 @@ jobs:
 
           APKSIGNER="$(find "$ANDROID_HOME/build-tools" -type f -name apksigner | sort -V | tail -n 1)"
           test -x "$APKSIGNER"
-          "$APKSIGNER" verify --verbose --print-certs "$APK_OUT" > apk-signature.txt
-          CERT_SHA256="$(sed -n 's/^Signer #1 certificate SHA-256 digest: //p' apk-signature.txt | head -n 1 | tr '[:lower:]' '[:upper:]')"
-          test -n "$CERT_SHA256"
+          "$APKSIGNER" verify --verbose --print-certs "$APK_OUT" 2>&1 | tee apk-signature.txt
+          CERT_SHA256="$(awk -F': ' 'tolower($1) ~ /signer #1 certificate sha-256 digest/ {print toupper($2); exit}' apk-signature.txt | tr -d '[:space:]')"
+          if ! [[ "$CERT_SHA256" =~ ^[A-F0-9]{64}$ ]]; then
+            echo "Could not extract a valid APK signing certificate SHA-256 fingerprint" >&2
+            cat apk-signature.txt >&2
+            exit 1
+          fi
+          echo "APK signing certificate SHA-256: ${CERT_SHA256}"
 
           SHA256="$(sha256sum "$APK_OUT" | awk '{print $1}')"
           SIZE_BYTES="$(stat -c%s "$APK_OUT")"
