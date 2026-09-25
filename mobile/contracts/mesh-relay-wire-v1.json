@@ -1,0 +1,35 @@
+{
+  "version": "telemetry-mesh-relay-wire/1",
+  "magicAscii": "TMR1",
+  "byteOrder": "big-endian",
+  "encoding": "length-prefixed-binary",
+  "limits": {
+    "maxStringUtf8Bytes": 512,
+    "maxRelayPathEntries": 32,
+    "maxEnvelopeBytes": 2097152
+  },
+  "fields": [
+    { "name": "magic", "type": "bytes", "length": 4 },
+    { "name": "messageId", "type": "utf8", "lengthPrefix": "u16" },
+    { "name": "senderId", "type": "utf8", "lengthPrefix": "u16" },
+    { "name": "recipientId", "type": "utf8", "lengthPrefix": "u16" },
+    { "name": "hopCount", "type": "u8" },
+    { "name": "hopLimit", "type": "u8" },
+    { "name": "relayPathCount", "type": "u8" },
+    { "name": "relayPath", "type": "utf8[]", "entryLengthPrefix": "u16" },
+    { "name": "createdAtEpochMs", "type": "i64" },
+    { "name": "expiresAtEpochMs", "type": "i64" },
+    { "name": "encodedEnvelopeLength", "type": "u32" },
+    { "name": "encodedEnvelope", "type": "bytes" }
+  ],
+  "rules": {
+    "encodedEnvelopeOpaque": true,
+    "encodedEnvelopeImmutableAcrossRelay": true,
+    "messageIdStableAcrossRelay": true,
+    "relayMayMutate": ["hopCount", "relayPath"],
+    "relayMustNotMutate": ["messageId", "senderId", "recipientId", "createdAtEpochMs", "encodedEnvelope"],
+    "rejectTrailingBytes": true,
+    "rejectOversizeEnvelope": true,
+    "rejectInvalidHopRange": true
+  }
+}
