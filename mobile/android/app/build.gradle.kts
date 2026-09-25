@@ -65,6 +65,7 @@ dependencies {
     implementation("androidx.core:core-ktx:1.17.0")
 
     implementation("org.bouncycastle:bcprov-jdk18on:1.86")
+    implementation("io.github.webrtc-sdk:android:150.7871.01")
 
     testImplementation("junit:junit:4.13.2")
 }
