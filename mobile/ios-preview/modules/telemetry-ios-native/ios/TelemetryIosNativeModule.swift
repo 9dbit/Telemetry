@@ -1772,11 +1772,17 @@ private final class TelemetryIosCore: NSObject, CBCentralManagerDelegate, CBPeri
     }
 
     let receipt = try FrameCodec.decodeReceipt(frame)
-    guard receipt.messageId == session.lastOutboundMessageId else {
-      throw TelemetryNativeError.message("Receipt does not match outbound message")
-    }
     guard TelemetryCryptoEngine.verifyReceipt(receipt, peerSigningKey: remote.signingPublicKey) else {
       throw TelemetryNativeError.message("Invalid signed delivery receipt")
+    }
+    if receipt.messageId.hasPrefix("profile:") {
+      if session.lastOutboundMessageId == receipt.messageId {
+        session.lastOutboundMessageId = nil
+      }
+      return
+    }
+    guard receipt.messageId == session.lastOutboundMessageId else {
+      throw TelemetryNativeError.message("Receipt does not match outbound message")
     }
 
     session.lastOutboundMessageId = nil
