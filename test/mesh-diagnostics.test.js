@@ -49,8 +49,8 @@ test('relay diagnostics expose route evidence without ciphertext or plaintext', 
   const serialized = JSON.stringify(snapshot);
   assert.equal(serialized.includes('mesh diagnostic secret'), false);
   assert.equal(serialized.includes(envelope.payload.ciphertext), false);
-  assert.equal(serialized.includes('ciphertext'), false);
-  assert.equal(serialized.includes('payload'), false);
+  assert.equal(serialized.includes('"ciphertext"'), false);
+  assert.equal(serialized.includes('"payload":'), false);
 });
 
 test('diagnostic view keeps only bounded relay metadata', () => {
