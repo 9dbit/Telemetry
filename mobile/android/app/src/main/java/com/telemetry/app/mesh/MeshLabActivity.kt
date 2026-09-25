@@ -93,6 +93,13 @@ class MeshLabActivity : ComponentActivity() {
         }
         endpoint = AndroidMeshWireEndpoint(identity, node)
         transport.attachMeshEndpoint(endpoint)
+        transport.setMeshRouteListener { peerId, acceptedRoutes ->
+            runOnUiThread {
+                bindWifiForTrustedPeer()
+                setStatus("Verified route update from $peerId: $acceptedRoutes")
+                renderRoutes()
+            }
+        }
         node.registerTransport(BleMeshTransportAdapter(TelemetryGattMeshRelayPort(transport)))
         node.registerTransport(WifiLocalMeshTransportAdapter(wifiPort))
         wifiPort.start()
@@ -103,6 +110,7 @@ class MeshLabActivity : ComponentActivity() {
 
     override fun onDestroy() {
         discovery?.stop()
+        transport.setMeshRouteListener(null)
         wifiPort.stop()
         transport.stop()
         super.onDestroy()
@@ -224,11 +232,6 @@ class MeshLabActivity : ComponentActivity() {
                 largeProbeButton.isEnabled = true
                 node.observeDirectPeer(event.deviceId, 0, "ble", System.currentTimeMillis())
                 setStatus("Trusted peer ${event.deviceId}")
-                renderRoutes()
-            }
-            is SecureTransportEvent.MeshRouteUpdated -> {
-                bindWifiForTrustedPeer()
-                setStatus("Verified route update from ${event.deviceId}: ${event.acceptedRoutes}")
                 renderRoutes()
             }
             is SecureTransportEvent.MessageReceived -> setStatus("Direct encrypted text received")
