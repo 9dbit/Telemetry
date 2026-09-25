@@ -7,11 +7,13 @@ import com.telemetry.app.crypto.DeviceIdentity
 import com.telemetry.app.mesh.AndroidMeshNodeRuntime
 import com.telemetry.app.mesh.AndroidMeshWireEndpoint
 import com.telemetry.app.mesh.BleMeshTransportAdapter
+import com.telemetry.app.mesh.MobileRouteEntry
 import com.telemetry.app.mesh.WifiLocalMeshTransportAdapter
 import com.telemetry.app.transport.AndroidTrustedControlChannel
 import com.telemetry.app.transport.AndroidWifiLocalMeshPort
 import com.telemetry.app.transport.TelemetryGattMeshRelayPort
 import com.telemetry.app.transport.TelemetryGattTransport
+import java.io.File
 
 class AndroidMediaAppRuntime(
     context: Context,
@@ -21,18 +23,19 @@ class AndroidMediaAppRuntime(
     private val onEvent: (NativeMediaTransferEvent) -> Unit
 ) {
     private var controllerRef: AndroidMediaTransferController? = null
+    private var endpointRef: AndroidMeshWireEndpoint? = null
 
-    private val wifiPort = AndroidWifiLocalMeshPort(
+    private val wifiPort: AndroidWifiLocalMeshPort = AndroidWifiLocalMeshPort(
         context = context.applicationContext,
         onRelayWire = { wire ->
-            endpoint.ingestRelayWire(wire, System.currentTimeMillis()) != null
+            endpointRef?.ingestRelayWire(wire, System.currentTimeMillis()) != null
         },
         onMediaChunkWire = { wire ->
             controllerRef?.ingestIncomingChunk(wire) == true
         }
     )
 
-    private val node = AndroidMeshNodeRuntime(
+    private val node: AndroidMeshNodeRuntime = AndroidMeshNodeRuntime(
         localDeviceId = identity.deviceId,
         capabilities = listOf("ble", "mesh-relay", wifiPort.localCapability),
         onLocalDelivery = { frame ->
@@ -40,8 +43,8 @@ class AndroidMediaAppRuntime(
         }
     )
 
-    private val endpoint = AndroidMeshWireEndpoint(identity, node)
-    private val controller = AndroidMediaTransferController(
+    private val endpoint: AndroidMeshWireEndpoint = AndroidMeshWireEndpoint(identity, node)
+    private val controller: AndroidMediaTransferController = AndroidMediaTransferController(
         context = context.applicationContext,
         identity = identity,
         controlChannel = AndroidTrustedControlChannel(identity, trustStore),
@@ -51,6 +54,7 @@ class AndroidMediaAppRuntime(
     )
 
     init {
+        endpointRef = endpoint
         controllerRef = controller
         gattTransport.attachMeshEndpoint(endpoint)
         gattTransport.setMeshRouteListener { peerId, _ ->
@@ -96,8 +100,9 @@ class AndroidMediaAppRuntime(
         )
     }
 
-    fun materializeIncomingToCache(assetId: String) =
+    fun materializeIncomingToCache(assetId: String): File =
         controller.materializeIncomingToCache(assetId)
 
-    fun routeSnapshot() = node.routeSnapshot(System.currentTimeMillis())
+    fun routeSnapshot(): List<MobileRouteEntry> =
+        node.routeSnapshot(System.currentTimeMillis())
 }
