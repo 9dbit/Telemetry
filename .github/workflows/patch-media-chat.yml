@@ -1,0 +1,128 @@
+name: One-shot media chat patch
+
+on:
+  push:
+    branches:
+      - feature/m1.5a-secure-media-foundation
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feature/m1.5a-secure-media-foundation
+          fetch-depth: 0
+      - name: Patch MainActivity media integration
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path('mobile/android/app/src/main/java/com/telemetry/app/MainActivity.kt')
+          s = path.read_text()
+          marker = 'private var mediaRuntime: AndroidMediaAppRuntime? = null'
+          if marker in s:
+              print('media chat integration already present')
+              raise SystemExit(0)
+
+          def once(old, new, label):
+              global s
+              count = s.count(old)
+              if count != 1:
+                  raise SystemExit(f'{label}: expected 1 match, got {count}')
+              s = s.replace(old, new, 1)
+
+          once(
+              'import com.telemetry.app.discovery.TelemetryBleDiscovery\nimport com.telemetry.app.transport.SecureTransportEvent',
+              'import com.telemetry.app.discovery.TelemetryBleDiscovery\nimport com.telemetry.app.media.AndroidMediaAppRuntime\nimport com.telemetry.app.media.NativeMediaTransferEvent\nimport com.telemetry.app.transport.SecureTransportEvent',
+              'media imports'
+          )
+          once(
+              '    private var transport: TelemetryGattTransport? = null\n    private var uiState by mutableStateOf(M1BUiState())',
+              '    private var transport: TelemetryGattTransport? = null\n    private var mediaRuntime: AndroidMediaAppRuntime? = null\n    private var uiState by mutableStateOf(M1BUiState())',
+              'media runtime field'
+          )
+          once(
+              '    override fun onCreate(savedInstanceState: Bundle?) {',
+              '''    private val mediaPicker = registerForActivityResult(\n        ActivityResultContracts.OpenDocument()\n    ) { uri ->\n        val peerId = uiState.trustedDeviceId\n        if (uri != null && peerId != null) {\n            uiState = uiState.copy(mediaStatus = "Preparing encrypted attachment…")\n            mediaRuntime?.queueUri(\n                uri = uri,\n                peerId = peerId,\n                conversationId = "chat:$peerId"\n            )\n        }\n    }\n\n    override fun onCreate(savedInstanceState: Bundle?) {''',
+              'media picker launcher'
+          )
+          once(
+              '''        transport = TelemetryGattTransport(this, identity, trustStore) { event ->\n            runOnUiThread { reduceSecure(event) }\n        }''',
+              '''        val activeTransport = TelemetryGattTransport(this, identity, trustStore) { event ->\n            runOnUiThread { reduceSecure(event) }\n        }\n        transport = activeTransport\n        mediaRuntime = AndroidMediaAppRuntime(\n            context = this,\n            identity = identity,\n            trustStore = trustStore,\n            gattTransport = activeTransport\n        ) { event ->\n            runOnUiThread { reduceMedia(event) }\n        }.also { it.start() }''',
+              'runtime construction'
+          )
+          once(
+              '                    onSend = ::sendDraft,\n                    onNearbyQuery',
+              '                    onSend = ::sendDraft,\n                    onAttach = ::pickMedia,\n                    onNearbyQuery',
+              'app attach callback'
+          )
+          once(
+              '''    override fun onDestroy() {\n        discovery?.stop()\n        transport?.stop()''',
+              '''    override fun onDestroy() {\n        discovery?.stop()\n        mediaRuntime?.stop()\n        transport?.stop()''',
+              'runtime stop'
+          )
+          once(
+              '    private fun sendDraft() {',
+              '''    private fun pickMedia() {\n        if (uiState.trustedDeviceId == null) {\n            uiState = uiState.copy(mediaStatus = "Connect to a trusted peer before sending media.")\n            return\n        }\n        mediaPicker.launch(\n            arrayOf(\n                "image/*",\n                "video/*",\n                "application/pdf",\n                "application/octet-stream"\n            )\n        )\n    }\n\n    private fun sendDraft() {''',
+              'pick media method'
+          )
+          once(
+              '''            is SecureTransportEvent.SessionTrusted -> {\n                screen = AppScreen.CHAT''',
+              '''            is SecureTransportEvent.SessionTrusted -> {\n                mediaRuntime?.observeTrustedPeer(event.deviceId)\n                screen = AppScreen.CHAT''',
+              'trusted peer media hook'
+          )
+          once(
+              '''            is SecureTransportEvent.Disconnected -> uiState.copy(\n                status = "Peer disconnected · message queue remains local",\n                connectedAddress = uiState.connectedAddress.takeUnless { it == event.address }\n            )''',
+              '''            is SecureTransportEvent.Disconnected -> {\n                uiState.trustedDeviceId?.let { mediaRuntime?.peerUnavailable(it) }\n                uiState.copy(\n                    status = "Peer disconnected · message queue remains local",\n                    connectedAddress = uiState.connectedAddress.takeUnless { it == event.address }\n                )\n            }''',
+              'disconnect media hook'
+          )
+          once(
+              '    private fun markLatestOutgoingDelivered(messages: List<ChatMessage>): List<ChatMessage> {',
+              '''    private fun reduceMedia(event: NativeMediaTransferEvent) {\n        uiState = when (event) {\n            is NativeMediaTransferEvent.Preparing -> uiState.copy(\n                mediaStatus = "Encrypting ${event.displayName}…"\n            )\n            is NativeMediaTransferEvent.OutgoingQueued -> uiState.copy(\n                mediaStatus = "Queued ${event.fileName} · ${event.totalChunks} encrypted chunk(s)"\n            )\n            is NativeMediaTransferEvent.OutgoingProgress -> uiState.copy(\n                mediaStatus = buildString {\n                    append("Sending encrypted attachment · ")\n                    append(event.acknowledgedChunks)\n                    append('/')\n                    append(event.totalChunks)\n                    event.transport?.let { append(" · ").append(it) }\n                }\n            )\n            is NativeMediaTransferEvent.OutgoingComplete -> uiState.copy(\n                mediaStatus = "Attachment delivered and verified",\n                messages = uiState.messages + ChatMessage(\n                    text = "📎 ${event.fileName}",\n                    outgoing = true,\n                    time = nowLabel(),\n                    delivered = true\n                )\n            )\n            is NativeMediaTransferEvent.IncomingProgress -> uiState.copy(\n                mediaStatus = "Receiving ${event.fileName} · ${event.receivedChunks}/${event.totalChunks}"\n            )\n            is NativeMediaTransferEvent.IncomingReady -> {\n                mediaRuntime?.materializeIncomingToCache(event.assetId)\n                uiState.copy(\n                    mediaStatus = "Received attachment verified",\n                    messages = uiState.messages + ChatMessage(\n                        text = "📎 ${event.fileName}",\n                        outgoing = false,\n                        time = nowLabel(),\n                        delivered = true\n                    )\n                )\n            }\n            is NativeMediaTransferEvent.Error -> uiState.copy(\n                mediaStatus = event.message\n            )\n        }\n    }\n\n    private fun markLatestOutgoingDelivered(messages: List<ChatMessage>): List<ChatMessage> {''',
+              'media event reducer'
+          )
+          once(
+              '    val showDiagnostics: Boolean = false,\n    val sosStatus: String? = null,',
+              '    val showDiagnostics: Boolean = false,\n    val mediaStatus: String? = null,\n    val sosStatus: String? = null,',
+              'media status state'
+          )
+          once(
+              '    onSend: () -> Unit,\n    onNearbyQuery:',
+              '    onSend: () -> Unit,\n    onAttach: () -> Unit,\n    onNearbyQuery:',
+              'root attach signature'
+          )
+          once(
+              '''                onDraft = onDraft,\n                onSend = onSend,\n                onMessages = onMessages,''',
+              '''                onDraft = onDraft,\n                onSend = onSend,\n                onAttach = onAttach,\n                onMessages = onMessages,''',
+              'chat attach pass-through'
+          )
+          once(
+              '''private fun ChatScreen(\n    state: M1BUiState,\n    onDraft: (String) -> Unit,\n    onSend: () -> Unit,\n    onMessages: () -> Unit,''',
+              '''private fun ChatScreen(\n    state: M1BUiState,\n    onDraft: (String) -> Unit,\n    onSend: () -> Unit,\n    onAttach: () -> Unit,\n    onMessages: () -> Unit,''',
+              'chat attach signature'
+          )
+          once(
+              '''                Row(verticalAlignment = Alignment.CenterVertically) {\n                    OutlinedTextField(''',
+              '''                state.mediaStatus?.let { status ->\n                    Text(\n                        status,\n                        color = TelemetryBlue,\n                        fontSize = 11.sp,\n                        modifier = Modifier.padding(start = 8.dp, bottom = 6.dp)\n                    )\n                }\n                Row(verticalAlignment = Alignment.CenterVertically) {\n                    Button(\n                        onClick = onAttach,\n                        enabled = state.trustedDeviceId != null,\n                        modifier = Modifier.size(48.dp),\n                        shape = CircleShape,\n                        colors = ButtonDefaults.buttonColors(\n                            containerColor = InkRaised,\n                            contentColor = TelemetryBlue\n                        )\n                    ) {\n                        Text("+", color = TelemetryBlue, fontSize = 24.sp)\n                    }\n                    Spacer(Modifier.width(8.dp))\n                    OutlinedTextField(''',
+              'chat attachment button'
+          )
+
+          path.write_text(s)
+          print('MainActivity media integration patched')
+          PY
+
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add mobile/android/app/src/main/java/com/telemetry/app/MainActivity.kt
+          if git diff --cached --quiet; then
+            echo 'No patch commit required'
+            exit 0
+          fi
+          git commit -m 'feat(android): wire encrypted media into chat'
+          git push origin HEAD:feature/m1.5a-secure-media-foundation
