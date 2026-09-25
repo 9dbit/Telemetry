@@ -3,6 +3,8 @@ package com.telemetry.app.call
 import android.content.Context
 import com.telemetry.app.crypto.DeviceIdentity
 import com.telemetry.app.media.AndroidMediaAppRuntime
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 
 /**
  * App-level coordinator that binds Telemetry encrypted signaling to the native WebRTC media engine.
@@ -17,6 +19,7 @@ class AndroidCallAppRuntime(
     onEvent: (NativeCallRuntimeEvent) -> Unit = {}
 ) {
     private val mediaEngine = AndroidWebRtcAudioEngine(context.applicationContext)
+    private val scheduler = Executors.newSingleThreadScheduledExecutor()
 
     private val runtime = AndroidCallRuntime(
         localDeviceId = identity.deviceId,
@@ -33,6 +36,12 @@ class AndroidCallAppRuntime(
         sharedRuntime.setCallSignalHandler { signal ->
             runtime.ingest(signal, System.currentTimeMillis())
         }
+        scheduler.scheduleWithFixedDelay(
+            { runCatching { runtime.tick(System.currentTimeMillis()) } },
+            1L,
+            1L,
+            TimeUnit.SECONDS
+        )
     }
 
     fun startOutgoing(peerId: String): String? = runtime.startOutgoing(peerId)
@@ -60,6 +69,7 @@ class AndroidCallAppRuntime(
 
     fun stop() {
         sharedRuntime.setCallSignalHandler(null)
+        scheduler.shutdownNow()
         if (runtime.activeCallId() != null) runtime.hangup("runtime-stopped")
     }
 }

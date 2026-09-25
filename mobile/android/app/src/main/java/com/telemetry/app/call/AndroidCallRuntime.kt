@@ -32,6 +32,7 @@ class AndroidCallRuntime(
         mediaEngine.setListener(::handleMediaEvent)
     }
 
+    @Synchronized
     fun startOutgoing(
         peerId: String,
         nowEpochMs: Long = System.currentTimeMillis(),
@@ -78,6 +79,7 @@ class AndroidCallRuntime(
         return callId
     }
 
+    @Synchronized
     fun ingest(signal: NativeCallSignal, nowEpochMs: Long = System.currentTimeMillis()): Boolean {
         return runCatching {
             AndroidCallProtocol.validate(signal)
@@ -113,6 +115,7 @@ class AndroidCallRuntime(
         }
     }
 
+    @Synchronized
     fun acceptIncoming(nowEpochMs: Long = System.currentTimeMillis()): Boolean {
         val current = session ?: return false
         if (current.isCaller || current.state != "incoming-ringing") return false
@@ -142,6 +145,7 @@ class AndroidCallRuntime(
         }
     }
 
+    @Synchronized
     fun declineIncoming(reason: String = "declined", nowEpochMs: Long = System.currentTimeMillis()): Boolean {
         val current = session ?: return false
         if (current.isCaller || current.state != "incoming-ringing") return false
@@ -150,6 +154,7 @@ class AndroidCallRuntime(
         return true
     }
 
+    @Synchronized
     fun cancelOutgoing(nowEpochMs: Long = System.currentTimeMillis()): Boolean {
         val current = session ?: return false
         if (!current.isCaller || current.state == "active") return false
@@ -158,6 +163,7 @@ class AndroidCallRuntime(
         return true
     }
 
+    @Synchronized
     fun hangup(reason: String = "local-hangup", nowEpochMs: Long = System.currentTimeMillis()): Boolean {
         val current = session ?: return false
         sendTerminal(current, "end", reason, nowEpochMs)
@@ -165,6 +171,7 @@ class AndroidCallRuntime(
         return true
     }
 
+    @Synchronized
     fun tick(nowEpochMs: Long = System.currentTimeMillis()): Boolean {
         val current = session ?: return false
         if (current.state == "active" || nowEpochMs < current.expiresAtEpochMs) return false
@@ -174,12 +181,14 @@ class AndroidCallRuntime(
         return true
     }
 
+    @Synchronized
     fun setMuted(muted: Boolean): Boolean {
         val current = session ?: return false
         if (current.state != "active") return false
         return mediaEngine.setMuted(current.callId, muted)
     }
 
+    @Synchronized
     fun setSpeakerEnabled(enabled: Boolean): Boolean {
         val current = session ?: return false
         if (current.state != "active") return false
@@ -301,6 +310,7 @@ class AndroidCallRuntime(
         return current.state in setOf("negotiating", "active")
     }
 
+    @Synchronized
     private fun handleMediaEvent(event: RealtimeCallMediaEvent) {
         val current = session ?: return
         if (event.callId != current.callId || !current.mediaPrepared) return
