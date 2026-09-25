@@ -57,6 +57,9 @@ class AndroidMeshNodeRuntime(
         return accepted
     }
 
+    fun peerCapabilities(peerId: String, nowEpochMs: Long): List<String> =
+        routeRuntime.capabilitiesForPeer(peerId, nowEpochMs)
+
     fun ingestRelayFrame(frame: OpaqueRelayFrame, nowEpochMs: Long): MeshCoordinatorResult =
         meshCoordinator.ingest(frame, nowEpochMs)
 
