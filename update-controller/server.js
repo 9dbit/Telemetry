@@ -1,4 +1,5 @@
 import http from 'node:http';
+import { pathToFileURL } from 'node:url';
 
 const PORT = Number(process.env.PORT || 8080);
 const REPOSITORY = process.env.TELEMETRY_GITHUB_REPOSITORY || '9dbit/Telemetry';
@@ -131,7 +132,8 @@ export function createServer() {
   });
 }
 
-if (process.env.NODE_ENV !== 'test') {
+const isDirectExecution = Boolean(process.argv[1]) && import.meta.url === pathToFileURL(process.argv[1]).href;
+if (isDirectExecution) {
   createServer().listen(PORT, '0.0.0.0', () => {
     console.log(`Telemetry update controller listening on :${PORT}`);
   });
