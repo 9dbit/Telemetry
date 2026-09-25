@@ -1,0 +1,391 @@
+diff --git a/mobile/android/app/src/main/java/com/telemetry/app/MainActivity.kt b/mobile/android/app/src/main/java/com/telemetry/app/MainActivity.kt
+index 538e192..54f6bf0 100644
+--- a/mobile/android/app/src/main/java/com/telemetry/app/MainActivity.kt
++++ b/mobile/android/app/src/main/java/com/telemetry/app/MainActivity.kt
+@@ -52,6 +52,8 @@ import androidx.compose.ui.text.font.FontWeight
+ import androidx.compose.ui.text.style.TextAlign
+ import androidx.compose.ui.unit.dp
+ import androidx.compose.ui.unit.sp
++import com.telemetry.app.call.AndroidCallAppRuntime
++import com.telemetry.app.call.NativeCallRuntimeEvent
+ import com.telemetry.app.crypto.AndroidIdentityStore
+ import com.telemetry.app.crypto.AndroidTrustStore
+ import com.telemetry.app.crypto.DeviceIdentity
+@@ -103,6 +105,9 @@ class MainActivity : ComponentActivity() {
+     private var discovery: TelemetryBleDiscovery? = null
+     private var transport: TelemetryGattTransport? = null
+     private var mediaRuntime: AndroidMediaAppRuntime? = null
++    private var callRuntime: AndroidCallAppRuntime? = null
++    private var pendingVoiceAction: String? = null
++    private var pendingVoicePeerId: String? = null
+     private var uiState by mutableStateOf(M1BUiState())
+     private var screen by mutableStateOf(AppScreen.MESSAGES)
+ 
+@@ -117,6 +122,27 @@ class MainActivity : ComponentActivity() {
+         )
+     }
+ 
++    private val voicePermissionLauncher = registerForActivityResult(
++        ActivityResultContracts.RequestPermission()
++    ) { granted ->
++        val action = pendingVoiceAction
++        val peerId = pendingVoicePeerId
++        pendingVoiceAction = null
++        pendingVoicePeerId = null
++        if (!granted) {
++            if (action == "accept") callRuntime?.declineIncoming("microphone-permission-denied")
++            uiState = uiState.copy(
++                callState = "idle",
++                callStatus = "Microphone permission is required for a live voice call."
++            )
++        } else {
++            when (action) {
++                "start" -> peerId?.let(::startVoiceCallNow)
++                "accept" -> acceptVoiceCallNow()
++            }
++        }
++    }
++
+     private val mediaPicker = registerForActivityResult(
+         ActivityResultContracts.OpenDocument()
+     ) { uri ->
+@@ -140,7 +166,7 @@ class MainActivity : ComponentActivity() {
+             runOnUiThread { reduceSecure(event) }
+         }
+         transport = activeTransport
+-        mediaRuntime = AndroidMediaAppRuntime(
++        val sharedRuntime = AndroidMediaAppRuntime(
+             context = this,
+             identity = identity,
+             trustStore = trustStore,
+@@ -148,6 +174,14 @@ class MainActivity : ComponentActivity() {
+         ) { event ->
+             runOnUiThread { reduceMedia(event) }
+         }.also { it.start() }
++        mediaRuntime = sharedRuntime
++        callRuntime = AndroidCallAppRuntime(
++            context = this,
++            identity = identity,
++            sharedRuntime = sharedRuntime
++        ) { event ->
++            runOnUiThread { reduceCall(event) }
++        }
+ 
+         setContent {
+             MaterialTheme(colorScheme = TelemetryScheme) {
+@@ -167,6 +201,12 @@ class MainActivity : ComponentActivity() {
+                     onDraft = { uiState = uiState.copy(draft = it) },
+                     onSend = ::sendDraft,
+                     onAttach = ::pickMedia,
++                    onStartVoiceCall = ::startVoiceCall,
++                    onAcceptVoiceCall = ::acceptVoiceCall,
++                    onDeclineVoiceCall = ::declineVoiceCall,
++                    onHangupVoiceCall = ::hangupVoiceCall,
++                    onToggleVoiceMute = ::toggleVoiceMute,
++                    onToggleVoiceSpeaker = ::toggleVoiceSpeaker,
+                     onNearbyQuery = { uiState = uiState.copy(nearbyQuery = it) },
+                     onStrongOnly = { uiState = uiState.copy(strongOnly = it) },
+                     onToggleDiagnostics = {
+@@ -180,6 +220,7 @@ class MainActivity : ComponentActivity() {
+ 
+     override fun onDestroy() {
+         discovery?.stop()
++        callRuntime?.stop()
+         mediaRuntime?.stop()
+         transport?.stop()
+         super.onDestroy()
+@@ -253,6 +294,62 @@ class MainActivity : ComponentActivity() {
+         )
+     }
+ 
++    private fun startVoiceCall() {
++        val peerId = uiState.trustedDeviceId ?: run {
++            uiState = uiState.copy(callStatus = "Connect to a trusted peer before starting a voice call.")
++            return
++        }
++        if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
++            pendingVoiceAction = "start"
++            pendingVoicePeerId = peerId
++            voicePermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
++            return
++        }
++        startVoiceCallNow(peerId)
++    }
++
++    private fun startVoiceCallNow(peerId: String) {
++        if (callRuntime?.startOutgoing(peerId) == null && uiState.callStatus == null) {
++            uiState = uiState.copy(callStatus = "Unable to start a direct voice call.")
++        }
++    }
++
++    private fun acceptVoiceCall() {
++        if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
++            pendingVoiceAction = "accept"
++            pendingVoicePeerId = uiState.callPeerId
++            voicePermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
++            return
++        }
++        acceptVoiceCallNow()
++    }
++
++    private fun acceptVoiceCallNow() {
++        if (callRuntime?.acceptIncoming() != true) {
++            uiState = uiState.copy(callStatus = "Unable to accept the current voice call.")
++        }
++    }
++
++    private fun declineVoiceCall() {
++        callRuntime?.declineIncoming("declined")
++    }
++
++    private fun hangupVoiceCall() {
++        callRuntime?.hangup("local-hangup")
++    }
++
++    private fun toggleVoiceMute() {
++        val next = !uiState.callMuted
++        if (callRuntime?.setMuted(next) == true) uiState = uiState.copy(callMuted = next)
++    }
++
++    private fun toggleVoiceSpeaker() {
++        val next = !uiState.callSpeakerEnabled
++        if (callRuntime?.setSpeakerEnabled(next) == true) {
++            uiState = uiState.copy(callSpeakerEnabled = next)
++        }
++    }
++
+     private fun sendDraft() {
+         val address = uiState.connectedAddress ?: return
+         val text = uiState.draft.trim()
+@@ -432,6 +529,59 @@ class MainActivity : ComponentActivity() {
+         }
+     }
+ 
++    private fun reduceCall(event: NativeCallRuntimeEvent) {
++        uiState = when (event) {
++            is NativeCallRuntimeEvent.OutgoingRinging -> uiState.copy(
++                callState = "outgoing-ringing",
++                callPeerId = event.peerId,
++                callStatus = "Calling nearby peer…",
++                callMuted = false,
++                callSpeakerEnabled = false
++            )
++            is NativeCallRuntimeEvent.IncomingRinging -> {
++                screen = AppScreen.CHAT
++                uiState.copy(
++                    callState = "incoming-ringing",
++                    callPeerId = event.peerId,
++                    callStatus = "Incoming encrypted-signaling voice call",
++                    callMuted = false,
++                    callSpeakerEnabled = false
++                )
++            }
++            is NativeCallRuntimeEvent.Negotiating -> uiState.copy(
++                callState = "negotiating",
++                callPeerId = event.peerId,
++                callStatus = "Connecting direct voice · ${event.transport}"
++            )
++            is NativeCallRuntimeEvent.Active -> uiState.copy(
++                callState = "active",
++                callPeerId = event.peerId,
++                callStatus = "Live voice · ${event.transport} · direct P2P"
++            )
++            is NativeCallRuntimeEvent.Ended -> uiState.copy(
++                callState = "idle",
++                callPeerId = null,
++                callStatus = "Call ended · ${event.reason}",
++                callMuted = false,
++                callSpeakerEnabled = false
++            )
++            is NativeCallRuntimeEvent.Unavailable -> uiState.copy(
++                callState = "idle",
++                callPeerId = event.peerId,
++                callStatus = if (event.offerVoiceMessage) {
++                    "Live voice unavailable on this route · send a voice message instead."
++                } else {
++                    "Live voice unavailable · ${event.reason}"
++                },
++                callMuted = false,
++                callSpeakerEnabled = false
++            )
++            is NativeCallRuntimeEvent.Error -> uiState.copy(
++                callStatus = "Voice call error · ${event.message}"
++            )
++        }
++    }
++
+     private fun markLatestOutgoingDelivered(messages: List<ChatMessage>): List<ChatMessage> {
+         val index = messages.indexOfLast { it.outgoing && !it.delivered }
+         if (index < 0) return messages
+@@ -461,6 +611,11 @@ data class M1BUiState(
+     val strongOnly: Boolean = false,
+     val showDiagnostics: Boolean = false,
+     val mediaStatus: String? = null,
++    val callState: String = "idle",
++    val callPeerId: String? = null,
++    val callStatus: String? = null,
++    val callMuted: Boolean = false,
++    val callSpeakerEnabled: Boolean = false,
+     val sosStatus: String? = null,
+     val sosSentAt: String? = null
+ )
+@@ -482,6 +637,12 @@ private fun TelemetryAppV2(
+     onDraft: (String) -> Unit,
+     onSend: () -> Unit,
+     onAttach: () -> Unit,
++    onStartVoiceCall: () -> Unit,
++    onAcceptVoiceCall: () -> Unit,
++    onDeclineVoiceCall: () -> Unit,
++    onHangupVoiceCall: () -> Unit,
++    onToggleVoiceMute: () -> Unit,
++    onToggleVoiceSpeaker: () -> Unit,
+     onNearbyQuery: (String) -> Unit,
+     onStrongOnly: (Boolean) -> Unit,
+     onToggleDiagnostics: () -> Unit,
+@@ -529,6 +690,12 @@ private fun TelemetryAppV2(
+                 onDraft = onDraft,
+                 onSend = onSend,
+                 onAttach = onAttach,
++                onStartVoiceCall = onStartVoiceCall,
++                onAcceptVoiceCall = onAcceptVoiceCall,
++                onDeclineVoiceCall = onDeclineVoiceCall,
++                onHangupVoiceCall = onHangupVoiceCall,
++                onToggleVoiceMute = onToggleVoiceMute,
++                onToggleVoiceSpeaker = onToggleVoiceSpeaker,
+                 onMessages = onMessages,
+                 onNearby = onNearby,
+                 onNetwork = onNetwork,
+@@ -922,6 +1089,12 @@ private fun ChatScreen(
+     onDraft: (String) -> Unit,
+     onSend: () -> Unit,
+     onAttach: () -> Unit,
++    onStartVoiceCall: () -> Unit,
++    onAcceptVoiceCall: () -> Unit,
++    onDeclineVoiceCall: () -> Unit,
++    onHangupVoiceCall: () -> Unit,
++    onToggleVoiceMute: () -> Unit,
++    onToggleVoiceSpeaker: () -> Unit,
+     onMessages: () -> Unit,
+     onNearby: () -> Unit,
+     onNetwork: () -> Unit,
+@@ -979,11 +1152,37 @@ private fun ChatScreen(
+                         )
+                     }
+                 }
+-                Text("Direct", color = TextSecondary, fontSize = 11.sp)
++                if (state.callState == "idle") {
++                    Button(
++                        onClick = onStartVoiceCall,
++                        enabled = state.trustedDeviceId != null,
++                        modifier = Modifier.height(40.dp),
++                        shape = RoundedCornerShape(14.dp),
++                        colors = ButtonDefaults.buttonColors(
++                            containerColor = InkSoft,
++                            contentColor = TelemetryCyan
++                        )
++                    ) {
++                        Text("☎  Call", fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
++                    }
++                } else {
++                    Text("Voice", color = TelemetryCyan, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
++                }
+             }
+ 
+             Box(modifier = Modifier.fillMaxWidth().height(1.dp).background(Divider))
+ 
++            if (state.callState != "idle") {
++                VoiceCallCard(
++                    state = state,
++                    onAccept = onAcceptVoiceCall,
++                    onDecline = onDeclineVoiceCall,
++                    onHangup = onHangupVoiceCall,
++                    onMute = onToggleVoiceMute,
++                    onSpeaker = onToggleVoiceSpeaker
++                )
++            }
++
+             if (state.messages.isEmpty()) {
+                 Column(
+                     modifier = Modifier
+@@ -1055,6 +1254,14 @@ private fun ChatScreen(
+                         modifier = Modifier.padding(start = 8.dp, bottom = 6.dp)
+                     )
+                 }
++                state.callStatus?.takeIf { state.callState == "idle" }?.let { status ->
++                    Text(
++                        status,
++                        color = TelemetryCyan,
++                        fontSize = 11.sp,
++                        modifier = Modifier.padding(start = 8.dp, bottom = 6.dp)
++                    )
++                }
+                 Row(verticalAlignment = Alignment.CenterVertically) {
+                     Button(
+                         onClick = onAttach,
+@@ -1101,6 +1308,66 @@ private fun ChatScreen(
+     }
+ }
+ 
++@Composable
++private fun VoiceCallCard(
++    state: M1BUiState,
++    onAccept: () -> Unit,
++    onDecline: () -> Unit,
++    onHangup: () -> Unit,
++    onMute: () -> Unit,
++    onSpeaker: () -> Unit
++) {
++    Card(
++        modifier = Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 10.dp),
++        colors = CardDefaults.cardColors(containerColor = Color(0xFF102A3D)),
++        shape = RoundedCornerShape(18.dp)
++    ) {
++        Column(modifier = Modifier.fillMaxWidth().padding(14.dp)) {
++            Text(
++                state.callStatus ?: "Voice call",
++                color = TextPrimary,
++                fontWeight = FontWeight.SemiBold,
++                fontSize = 14.sp
++            )
++            Spacer(Modifier.height(10.dp))
++            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
++                when (state.callState) {
++                    "incoming-ringing" -> {
++                        Button(
++                            onClick = onAccept,
++                            colors = ButtonDefaults.buttonColors(containerColor = TelemetryCyan, contentColor = Ink)
++                        ) { Text("Accept", fontWeight = FontWeight.Bold) }
++                        Button(
++                            onClick = onDecline,
++                            colors = ButtonDefaults.buttonColors(containerColor = SosRed)
++                        ) { Text("Decline") }
++                    }
++                    "active" -> {
++                        Button(
++                            onClick = onMute,
++                            colors = ButtonDefaults.buttonColors(containerColor = if (state.callMuted) TelemetryBlue else InkSoft)
++                        ) { Text(if (state.callMuted) "Unmute" else "Mute") }
++                        Button(
++                            onClick = onSpeaker,
++                            colors = ButtonDefaults.buttonColors(containerColor = if (state.callSpeakerEnabled) TelemetryBlue else InkSoft)
++                        ) { Text(if (state.callSpeakerEnabled) "Speaker On" else "Speaker") }
++                        Button(
++                            onClick = onHangup,
++                            colors = ButtonDefaults.buttonColors(containerColor = SosRed)
++                        ) { Text("End") }
++                    }
++                    else -> {
++                        Button(
++                            onClick = onHangup,
++                            colors = ButtonDefaults.buttonColors(containerColor = SosRed)
++                        ) { Text("Cancel") }
++                    }
++                }
++            }
++        }
++    }
++}
++
+ @Composable
+ private fun NetworkScreen(
+     state: M1BUiState,
