@@ -24,7 +24,7 @@ import * as DocumentPicker from 'expo-document-picker';
 import Telemetry from 'telemetry-ios-native';
 import type { AppearanceMode, Contact, LocalProfile, LocalState, MediaEvent, PeerSeenEvent, TelemetryIdentity } from 'telemetry-ios-native';
 
-type Tab = 'Chats' | 'Nearby' | 'Network' | 'SOS' | 'Settings';
+type Tab = 'Social' | 'Calls' | 'Nearby' | 'Chats' | 'SOS' | 'Settings';
 type Peer = PeerSeenEvent & { lastSeen: number };
 type DeliveryState = 'queued' | 'finding' | 'connecting' | 'sending' | 'delivered' | 'retry';
 type ChatMessage = {
@@ -90,11 +90,11 @@ let styles = createStyles(C);
 const GLASS_NOISE = require('./assets/ui/glass-noise.png');
 
 const NAV: { tab: Tab; icon: string }[] = [
-  { tab: 'Chats', icon: 'message.fill' },
+  { tab: 'Social', icon: 'person.2.fill' },
+  { tab: 'Calls', icon: 'phone.fill' },
   { tab: 'Nearby', icon: 'dot.radiowaves.left.and.right' },
-  { tab: 'Network', icon: 'network' },
+  { tab: 'Chats', icon: 'message.fill' },
   { tab: 'SOS', icon: 'sos.circle.fill' },
-  { tab: 'Settings', icon: 'gearshape.fill' },
 ];
 
 const AVATAR_TEMPLATES = [
@@ -138,6 +138,7 @@ function touchDistance(touches: readonly { pageX: number; pageY: number }[]) {
 export default function App() {
   const systemScheme = useColorScheme();
   const [tab, setTab] = useState<Tab>('Chats');
+  const [settingsPage, setSettingsPage] = useState<'main' | 'network'>('main');
   const [identity, setIdentity] = useState<TelemetryIdentity | null>(null);
   const [peers, setPeers] = useState<Record<string, Peer>>({});
   const [running, setRunning] = useState(false);
@@ -211,10 +212,15 @@ export default function App() {
   }), []);
   const backSwipe = useMemo(() => PanResponder.create({
     onMoveShouldSetPanResponder: (event, gesture) =>
-      gesture.x0 <= 32 &&
+      gesture.x0 <= 38 &&
       gesture.dx > 10 &&
-      Math.abs(gesture.dy) < 24 &&
-      Math.abs(gesture.dx) > Math.abs(gesture.dy) * 1.25,
+      Math.abs(gesture.dy) < 28 &&
+      Math.abs(gesture.dx) > Math.abs(gesture.dy) * 1.2,
+    onMoveShouldSetPanResponderCapture: (event, gesture) =>
+      gesture.x0 <= 38 &&
+      gesture.dx > 10 &&
+      Math.abs(gesture.dy) < 28 &&
+      Math.abs(gesture.dx) > Math.abs(gesture.dy) * 1.2,
     onPanResponderRelease: (_event, gesture) => {
       if (gesture.dx > 72 || gesture.vx > 0.5) setChatOpen(false);
     },
@@ -687,6 +693,11 @@ export default function App() {
       let fileName = `telemetry-${Date.now()}`;
 
       if (kind === 'photo' || kind === 'video') {
+        const permission = await ImagePicker.requestMediaLibraryPermissionsAsync();
+        if (!permission.granted) {
+          Alert.alert('Photos permission', 'Allow photo library access in Settings to attach photos or videos.');
+          return;
+        }
         const result = await ImagePicker.launchImageLibraryAsync({
           mediaTypes: kind === 'photo' ? ['images'] : ['videos'],
           quality: 1,
@@ -917,13 +928,35 @@ export default function App() {
             <Text style={styles.brand}>Telemetry</Text>
             <Text style={styles.subtle}>Offline-first · adaptive transport</Text>
           </View>
-          <Pressable style={styles.headerAvatarButton} onPress={() => setTab('Settings')} hitSlop={8}>
+          <Pressable style={styles.headerAvatarButton} onPress={() => { setSettingsPage('main'); setTab('Settings'); }} hitSlop={8}>
             <LocalProfileAvatar profile={profile} size={42} />
           </Pressable>
         </View>
       )}
 
       <View style={styles.content}>
+        {tab === 'Social' && (
+          <ScrollView contentContainerStyle={styles.page}>
+            <Text style={styles.title}>Social</Text>
+            <Text style={styles.copy}>Your trusted peer network, activity and shared updates will live here without exposing private message content.</Text>
+            <View style={styles.card}>
+              <Text style={styles.cardTitle}>Private social layer</Text>
+              <Text style={styles.cardCopy}>Profile posts, reporting, comments and sharing are the next social milestone. Identity and trust stay peer-owned.</Text>
+            </View>
+          </ScrollView>
+        )}
+
+        {tab === 'Calls' && (
+          <ScrollView contentContainerStyle={styles.page}>
+            <Text style={styles.title}>Calls</Text>
+            <Text style={styles.copy}>Voice and video sessions between trusted peers will appear here.</Text>
+            <View style={styles.card}>
+              <Text style={styles.cardTitle}>Voice · M1.6</Text>
+              <Text style={styles.cardCopy}>Encrypted call signaling and direct Wi-Fi media are being wired for iOS. Video follows on the same authenticated session.</Text>
+            </View>
+          </ScrollView>
+        )}
+
         {tab === 'Chats' && (
           <ScrollView contentContainerStyle={styles.page}>
             <Text style={styles.title}>Chats</Text>
@@ -1075,8 +1108,14 @@ export default function App() {
           </View>
         )}
 
-        {tab === 'Network' && (
+        {tab === 'Settings' && settingsPage === 'network' && (
           <ScrollView contentContainerStyle={styles.page}>
+            <View style={styles.settingsSubHeader}>
+              <Pressable style={styles.settingsBackButton} onPress={() => setSettingsPage('main')}>
+                <SymbolView name={'chevron.left' as any} size={18} tintColor={C.blue} weight="semibold" />
+                <Text style={styles.settingsBackText}>Settings</Text>
+              </Pressable>
+            </View>
             <Text style={styles.title}>Network</Text>
             <Text style={styles.copy}>Telemetry chooses the best available route. BLE is live today; longer-range transports plug into the same delivery engine.</Text>
             <TransportCard icon="dot.radiowaves.left.and.right" title="Bluetooth LE" detail="Discovery · bootstrap · direct chat" status={running ? 'ACTIVE' : 'READY'} active />
@@ -1111,7 +1150,7 @@ export default function App() {
           </ScrollView>
         )}
 
-        {tab === 'Settings' && (
+        {tab === 'Settings' && settingsPage === 'main' && (
           <ScrollView contentContainerStyle={styles.page}>
             <Text style={styles.title}>Settings</Text>
             <Text style={styles.section}>Profile</Text>
@@ -1149,6 +1188,15 @@ export default function App() {
               <Text style={styles.cardTitle}>Automatic</Text>
               <Text style={styles.cardCopy}>Users send messages; Telemetry handles discovery, reconnect and secure transport in the background.</Text>
             </View>
+            <Text style={styles.section}>Network</Text>
+            <Pressable style={[styles.card, styles.settingsMenuCard]} onPress={() => setSettingsPage('network')}>
+              <View style={styles.settingsMenuIcon}><SymbolView name={'network' as any} size={21} tintColor={C.blue} /></View>
+              <View style={styles.flex}>
+                <Text style={styles.cardTitle}>Network & transport</Text>
+                <Text style={styles.cardCopy}>BLE, Wi-Fi, mesh relay and gateway status.</Text>
+              </View>
+              <SymbolView name={'chevron.right' as any} size={15} tintColor={C.muted} />
+            </Pressable>
             <Text style={styles.section}>Reliability Lab · M1.2D</Text>
             <View style={styles.card}>
               <Text style={styles.cardTitle}>Transport torture test</Text>
@@ -1267,7 +1315,8 @@ export default function App() {
       </Modal>
 
       <Modal visible={attachmentMenuOpen} transparent animationType="fade" onRequestClose={() => setAttachmentMenuOpen(false)}>
-        <Pressable style={styles.attachmentBackdrop} onPress={() => setAttachmentMenuOpen(false)}>
+        <View style={styles.attachmentBackdrop}>
+          <Pressable style={styles.attachmentDismissLayer} onPress={() => setAttachmentMenuOpen(false)} />
           <BlurView intensity={55} tint={resolvedAppearance === 'light' ? 'light' : 'dark'} style={styles.attachmentSheet}>
             <Image source={GLASS_NOISE} resizeMode="repeat" style={styles.glassNoiseStrong} />
             <Text style={styles.attachmentTitle}>Attach securely</Text>
@@ -1285,7 +1334,7 @@ export default function App() {
               ))}
             </View>
           </BlurView>
-        </Pressable>
+        </View>
       </Modal>
 
       <Modal visible={!!verification} transparent animationType="slide" onRequestClose={() => setVerification(null)}>
@@ -1313,13 +1362,16 @@ export default function App() {
         <SafeAreaView style={styles.safe} {...backSwipe.panHandlers}>
           <KeyboardAvoidingView style={styles.safe} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
             <View style={styles.chatHeader}>
-              <Pressable onPress={() => setChatOpen(false)}><Text style={styles.link}>Close</Text></Pressable>
-              <View style={styles.center}>
-                <Pressable onLongPress={() => activeContact && void renameContact(activeContact)}>
-                  <Text style={styles.cardTitle}>{activePeerName}</Text>
-                  <Text style={styles.route}>{chatRouteLabel}</Text>
-                </Pressable>
-              </View>
+              <Pressable style={styles.chatBackButton} onPress={() => setChatOpen(false)} hitSlop={10}>
+                <SymbolView name={'chevron.left' as any} size={22} tintColor={C.blue} weight="semibold" />
+              </Pressable>
+              <Pressable style={styles.chatPeerHeader} onLongPress={() => activeContact && void renameContact(activeContact)}>
+                <PeerAvatar name={activePeerName} photoUri={activeContact?.profilePhotoUri} trusted size={36} />
+                <View>
+                  <Text style={styles.chatPeerName}>{activePeerName}</Text>
+                  <Text style={styles.chatPeerRoute}>{chatRouteLabel}</Text>
+                </View>
+              </Pressable>
               <View style={styles.headerSpacer} />
             </View>
             {activeHasPending && !sessionReady && (
@@ -1342,14 +1394,20 @@ export default function App() {
               keyboardShouldPersistTaps="handled"
               maintainVisibleContentPosition={{ minIndexForVisible: 0 }}
               renderItem={({ item }) => (
-                <BlurView intensity={28} tint={resolvedAppearance === 'light' ? 'light' : 'dark'} style={[styles.bubble, item.mine ? styles.mine : styles.theirs]}>
-                  <Image source={GLASS_NOISE} resizeMode="repeat" style={styles.glassNoise} />
-                  <Text style={styles.bubbleText}>{item.text}</Text>
-                  <View style={styles.bubbleMeta}>
-                    {item.mine && <Text style={styles.receipt}>{deliveryLabel(item.state)}</Text>}
-                    <Text style={styles.timestamp}>{formatMessageTime(item.timestamp)}</Text>
+                <View style={[styles.messageRow, item.mine ? styles.messageRowMine : styles.messageRowTheirs]}>
+                  {!item.mine && <PeerAvatar name={activePeerName} photoUri={activeContact?.profilePhotoUri} trusted size={30} />}
+                  <View style={styles.bubbleWrap}>
+                    <View style={[styles.bubbleTail, item.mine ? styles.bubbleTailMine : styles.bubbleTailTheirs]} />
+                    <BlurView intensity={28} tint={resolvedAppearance === 'light' ? 'light' : 'dark'} style={[styles.bubble, item.mine ? styles.mine : styles.theirs]}>
+                      <Image source={GLASS_NOISE} resizeMode="repeat" style={styles.glassNoise} />
+                      <Text style={styles.bubbleText}>{item.text}</Text>
+                      <View style={styles.bubbleMeta}>
+                        {item.mine && <Text style={styles.receipt}>{deliveryLabel(item.state)}</Text>}
+                        <Text style={styles.timestamp}>{formatMessageTime(item.timestamp)}</Text>
+                      </View>
+                    </BlurView>
                   </View>
-                </BlurView>
+                </View>
               )}
               ListFooterComponent={activeMediaTransfers.length ? (
                 <View style={styles.mediaTransferList}>
@@ -1539,7 +1597,7 @@ function createStyles(C: ThemeColors) {
   headerAvatarButton: { width: 46, height: 46, borderRadius: 23, alignItems: 'center', justifyContent: 'center' },
   statusDot: { width: 9, height: 9, borderRadius: 99 },
   content: { flex: 1 },
-  page: { flexGrow: 1, padding: 20, paddingBottom: 28 },
+  page: { flexGrow: 1, padding: 20, paddingBottom: 118 },
   title: { color: C.text, fontSize: 34, fontWeight: '800', marginBottom: 8 },
   copy: { color: C.muted, fontSize: 14, lineHeight: 20 },
   pillRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginVertical: 18 },
@@ -1551,6 +1609,11 @@ function createStyles(C: ThemeColors) {
   profileName: { color: C.text, fontSize: 19, fontWeight: '800' },
   profileAbout: { color: C.muted, fontSize: 12, lineHeight: 17, marginTop: 4 },
   profilePencilButton: { width: 40, height: 40, borderRadius: 20, alignItems: 'center', justifyContent: 'center', backgroundColor: C.glass, borderWidth: 1, borderColor: C.line },
+  settingsSubHeader: { minHeight: 38, justifyContent: 'center', marginBottom: 6 },
+  settingsBackButton: { alignSelf: 'flex-start', minHeight: 36, flexDirection: 'row', alignItems: 'center', gap: 4, paddingRight: 12 },
+  settingsBackText: { color: C.blue, fontSize: 14, fontWeight: '700' },
+  settingsMenuCard: { flexDirection: 'row', alignItems: 'center', gap: 12 },
+  settingsMenuIcon: { width: 42, height: 42, borderRadius: 14, alignItems: 'center', justifyContent: 'center', backgroundColor: C.glass },
   appearanceSwitch: { flexDirection: 'row', gap: 8, marginTop: 14 },
   appearanceButton: { flex: 1, height: 42, borderRadius: 13, flexDirection: 'row', gap: 7, alignItems: 'center', justifyContent: 'center', backgroundColor: C.glass, borderWidth: 1, borderColor: C.line },
   appearanceButtonActive: { backgroundColor: C.blue, borderColor: C.blue },
@@ -1656,8 +1719,8 @@ function createStyles(C: ThemeColors) {
   sosTitle: { color: C.text, fontSize: 22, fontWeight: '800', marginTop: 12 },
   sosButton: { marginTop: 24, minHeight: 58, alignSelf: 'stretch', backgroundColor: '#A91E31', borderRadius: 18, alignItems: 'center', justifyContent: 'center' },
   sosText: { color: '#FFF', fontWeight: '800', fontSize: 15 },
-  nav: { minHeight: 76, paddingTop: 8, paddingBottom: 5, flexDirection: 'row', backgroundColor: C.ink, borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: C.line },
-  navItem: { flex: 1, minHeight: 58, alignItems: 'center', justifyContent: 'center', gap: 4 },
+  nav: { position: 'absolute', left: 14, right: 14, bottom: 10, height: 72, paddingHorizontal: 5, paddingVertical: 5, flexDirection: 'row', backgroundColor: C.glassStrong, borderWidth: 1, borderColor: C.line, borderRadius: 25, shadowColor: '#000', shadowOpacity: 0.28, shadowRadius: 18, shadowOffset: { width: 0, height: 8 }, elevation: 14 },
+  navItem: { flex: 1, minHeight: 58, borderRadius: 20, alignItems: 'center', justifyContent: 'center', gap: 3 },
   navIconWrap: { position: 'relative', minWidth: 30, alignItems: 'center' },
   navBadge: { position: 'absolute', top: -7, right: -9, minWidth: 18, height: 18, paddingHorizontal: 4, borderRadius: 9, backgroundColor: C.cyan, alignItems: 'center', justifyContent: 'center' },
   navBadgeText: { color: C.ink, fontSize: 9, fontWeight: '900' },
@@ -1685,15 +1748,26 @@ function createStyles(C: ThemeColors) {
   sheetTitle: { color: C.text, fontSize: 25, fontWeight: '800', marginTop: 5 },
   code: { color: C.text, fontFamily: 'Menlo', fontSize: 42, fontWeight: '800', textAlign: 'center', marginVertical: 26, letterSpacing: 3 },
   secondary: { height: 48, alignItems: 'center', justifyContent: 'center', marginTop: 6 },
-  chatHeader: { height: 68, paddingHorizontal: 18, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: C.line },
-  headerSpacer: { width: 44 },
+  chatHeader: { height: 68, paddingHorizontal: 14, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: C.line },
+  chatBackButton: { width: 42, height: 42, borderRadius: 21, alignItems: 'center', justifyContent: 'center' },
+  chatPeerHeader: { position: 'absolute', left: 58, right: 58, minHeight: 48, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 9 },
+  chatPeerName: { color: C.text, fontSize: 15, fontWeight: '800' },
+  chatPeerRoute: { color: C.cyan, fontSize: 8, fontWeight: '800', letterSpacing: 0.7, marginTop: 2 },
+  headerSpacer: { width: 42 },
   offlineBanner: { marginHorizontal: 12, marginTop: 10, paddingHorizontal: 13, paddingVertical: 11, borderRadius: 15, flexDirection: 'row', alignItems: 'center', gap: 10, backgroundColor: '#102337', borderWidth: 1, borderColor: '#2F86FF88' },
   offlineBannerTitle: { color: C.text, fontSize: 12, fontWeight: '800' },
   offlineBannerCopy: { color: C.muted, fontSize: 11, lineHeight: 15, marginTop: 2 },
   messages: { padding: 16, paddingBottom: 22, gap: 10 },
-  bubble: { maxWidth: '82%', paddingHorizontal: 14, paddingVertical: 11, borderRadius: 18, overflow: 'hidden', borderWidth: 1, borderColor: C.line },
-  mine: { alignSelf: 'flex-end', backgroundColor: resolvedMineGlass(C) },
-  theirs: { alignSelf: 'flex-start', backgroundColor: C.glass },
+  messageRow: { width: '100%', flexDirection: 'row', alignItems: 'flex-end' },
+  messageRowMine: { justifyContent: 'flex-end' },
+  messageRowTheirs: { justifyContent: 'flex-start', gap: 8 },
+  bubbleWrap: { maxWidth: '82%', position: 'relative' },
+  bubble: { paddingHorizontal: 14, paddingVertical: 11, borderRadius: 18, overflow: 'hidden', borderWidth: 1, borderColor: C.line, zIndex: 2 },
+  bubbleTail: { position: 'absolute', bottom: 10, width: 14, height: 14, transform: [{ rotate: '45deg' }], borderWidth: 1, borderColor: C.line, zIndex: 1 },
+  bubbleTailMine: { right: -4, backgroundColor: resolvedMineGlass(C) },
+  bubbleTailTheirs: { left: -4, backgroundColor: C.glass },
+  mine: { backgroundColor: resolvedMineGlass(C) },
+  theirs: { backgroundColor: C.glass },
   bubbleText: { color: C.text, fontSize: 16, lineHeight: 21 },
   bubbleMeta: { marginTop: 6, flexDirection: 'row', alignItems: 'center', justifyContent: 'flex-end', gap: 8 },
   receipt: { color: '#BBD5F2', fontSize: 10, flexShrink: 1 },
@@ -1715,7 +1789,8 @@ function createStyles(C: ThemeColors) {
   input: { flex: 1, height: 48, backgroundColor: C.glass, color: C.text, borderRadius: 16, borderWidth: 1, borderColor: C.line, paddingHorizontal: 16, paddingTop: 12, paddingBottom: 12, fontSize: 16 },
   glassNoise: { position: 'absolute', left: 0, right: 0, top: 0, bottom: 0, width: '100%', height: '100%', opacity: 0.12 },
   glassNoiseStrong: { position: 'absolute', left: 0, right: 0, top: 0, bottom: 0, width: '100%', height: '100%', opacity: 0.17 },
-  attachmentBackdrop: { flex: 1, backgroundColor: 'rgba(0,0,0,0.42)', justifyContent: 'flex-end', padding: 14, paddingBottom: 28 },
+  attachmentBackdrop: { flex: 1, backgroundColor: 'rgba(0,0,0,0.42)', justifyContent: 'flex-end', padding: 14, paddingBottom: 28, position: 'relative' },
+  attachmentDismissLayer: { position: 'absolute', left: 0, right: 0, top: 0, bottom: 0 },
   attachmentSheet: { borderRadius: 26, padding: 18, overflow: 'hidden', borderWidth: 1, borderColor: C.line, backgroundColor: C.glassStrong },
   attachmentTitle: { color: C.text, fontSize: 18, fontWeight: '800' },
   attachmentCopy: { color: C.muted, fontSize: 11, lineHeight: 16, marginTop: 4 },
