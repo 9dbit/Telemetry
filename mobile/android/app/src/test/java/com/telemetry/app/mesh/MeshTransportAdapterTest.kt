@@ -51,9 +51,9 @@ class MeshTransportAdapterTest {
     )
 
     @Test
-    fun wifiDirectIsPreferredOverBleBySharedPolicy() {
-        val ble = FakeAdapter("ble", quality = 20)
-        val wifi = FakeAdapter("wifi-direct", quality = -20)
+    fun wifiDirectIsPreferredOverBleAtComparableQuality() {
+        val ble = FakeAdapter("ble", quality = 0)
+        val wifi = FakeAdapter("wifi-direct", quality = 0)
         val coordinator = MeshTransportCoordinator(listOf(ble, wifi))
 
         val result = coordinator.send("device-b", frame())
@@ -62,6 +62,20 @@ class MeshTransportAdapterTest {
         assertEquals("wifi-direct", result.transportId)
         assertEquals(listOf("m-transport"), wifi.sent)
         assertTrue(ble.sent.isEmpty())
+    }
+
+    @Test
+    fun significantlyBetterBleQualityCanOutscoreWeakWifi() {
+        val ble = FakeAdapter("ble", quality = 20)
+        val wifi = FakeAdapter("wifi-direct", quality = -20)
+        val coordinator = MeshTransportCoordinator(listOf(ble, wifi))
+
+        val result = coordinator.send("device-b", frame())
+
+        assertTrue(result.sent)
+        assertEquals("ble", result.transportId)
+        assertEquals(listOf("m-transport"), ble.sent)
+        assertTrue(wifi.sent.isEmpty())
     }
 
     @Test
