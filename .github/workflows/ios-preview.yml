@@ -73,9 +73,9 @@ jobs:
             echo "No Xcode workspace generated"
             exit 1
           fi
-          SCHEME="TelemetryiOSPreview"
-          if ! xcodebuild -workspace "$WORKSPACE" -list -json | python3 -c 'import json,sys; d=json.load(sys.stdin); assert "TelemetryiOSPreview" in d["workspace"]["schemes"], d["workspace"]["schemes"]'; then
-            echo "TelemetryiOSPreview app scheme was not generated"
+          SCHEME="Telemetry"
+          if ! xcodebuild -workspace "$WORKSPACE" -list -json | python3 -c 'import json,sys; d=json.load(sys.stdin); assert "Telemetry" in d["workspace"]["schemes"], d["workspace"]["schemes"]'; then
+            echo "Telemetry app scheme was not generated"
             exit 1
           fi
           set +e
