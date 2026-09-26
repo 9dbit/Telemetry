@@ -6,17 +6,33 @@
     "orientation": "portrait",
     "scheme": "telemetry-preview",
     "userInterfaceStyle": "dark",
-    "platforms": ["ios"],
+    "platforms": [
+      "ios"
+    ],
     "ios": {
       "supportsTablet": false,
       "bundleIdentifier": "com.telemetry.ios.preview",
       "buildNumber": "2",
       "infoPlist": {
         "NSBluetoothAlwaysUsageDescription": "Telemetry uses Bluetooth to discover and securely communicate with nearby Telemetry devices without internet.",
-        "UIBackgroundModes": ["bluetooth-central", "bluetooth-peripheral"]
+        "UIBackgroundModes": [
+          "bluetooth-central",
+          "bluetooth-peripheral"
+        ],
+        "NSCameraUsageDescription": "Telemetry uses the camera only when you choose Camera to capture media for an encrypted peer-to-peer message.",
+        "NSPhotoLibraryUsageDescription": "Telemetry accesses your photo library only when you choose media to send securely to a trusted peer.",
+        "NSContactsUsageDescription": "Telemetry accesses Contacts only when you choose Contact to share a selected contact with a trusted peer.",
+        "NSLocalNetworkUsageDescription": "Telemetry uses the local network and peer-to-peer Wi-Fi to securely communicate with nearby Telemetry devices without internet.",
+        "NSBonjourServices": [
+          "_telemetry._tcp",
+          "_tlm-media._tcp"
+        ]
       }
     },
-    "plugins": ["expo-dev-client"],
+    "plugins": [
+      "expo-dev-client",
+      "expo-contacts"
+    ],
     "runtimeVersion": "0.1.1"
   }
 }

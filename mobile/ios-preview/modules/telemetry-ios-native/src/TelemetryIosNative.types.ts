@@ -46,12 +46,30 @@ export type PersistedMessage = {
   lastError?: string;
 };
 
+export type PersistedMedia = {
+  assetId: string;
+  peerDeviceId: string;
+  kind: 'photo' | 'video' | 'file';
+  fileName: string;
+  byteLength: number;
+  state: 'outgoingQueued' | 'outgoingProgress' | 'outgoingComplete' | 'incomingProgress' | 'incomingReady' | 'paused';
+  totalChunks: number;
+  acknowledgedChunks?: number;
+  receivedChunks?: number;
+  localUri?: string;
+  sha256?: string;
+  verified?: boolean;
+  message?: string;
+  updatedAt: number;
+};
+
 export type LocalState = {
   version: number;
   profile?: LocalProfile;
   appearance?: AppearanceMode;
   contacts: Contact[];
   messages: PersistedMessage[];
+  media?: PersistedMedia[];
 };
 
 export type PeerSeenEvent = {

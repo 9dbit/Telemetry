@@ -3,6 +3,7 @@ import {
   Alert,
   AppState,
   FlatList,
+  Keyboard,
   KeyboardAvoidingView,
   Image,
   Modal,
@@ -16,11 +17,13 @@ import {
   TextInput,
   View,
   useColorScheme,
+  useWindowDimensions,
 } from 'react-native';
 import { SymbolView } from 'expo-symbols';
 import { BlurView } from 'expo-blur';
 import * as ImagePicker from 'expo-image-picker';
 import * as DocumentPicker from 'expo-document-picker';
+import * as Contacts from 'expo-contacts';
 import Telemetry from 'telemetry-ios-native';
 import type { AppearanceMode, Contact, LocalProfile, LocalState, MediaEvent, PeerSeenEvent, TelemetryIdentity } from 'telemetry-ios-native';
 
@@ -38,7 +41,7 @@ type ChatMessage = {
 };
 type TrustedPeer = { peerId: string; deviceId: string };
 type TestTransport = 'auto' | 'ble' | 'wifi';
-type PendingIntent = { localId: string; peerId: string; text: string; transportId?: string; attemptCount?: number; nextAttemptAt?: number; testTransport?: TestTransport };
+type PendingIntent = { localId: string; peerId: string; peerDeviceId: string; text: string; transportId?: string; attemptCount?: number; nextAttemptAt?: number; testTransport?: TestTransport };
 type ReliabilityDiagnostics = {
   messageRecords: number;
   pendingOutgoing: number;
@@ -164,6 +167,10 @@ export default function App() {
   const [profileSaving, setProfileSaving] = useState(false);
   const [appearanceMode, setAppearanceMode] = useState<AppearanceMode>('dark');
   const [attachmentMenuOpen, setAttachmentMenuOpen] = useState(false);
+  const [mediaViewerAssetId, setMediaViewerAssetId] = useState<string | null>(null);
+  const [contactInfoOpen, setContactInfoOpen] = useState(false);
+  const [callMode, setCallMode] = useState<'voice' | 'video' | null>(null);
+  const { width: viewportWidth, height: viewportHeight } = useWindowDimensions();
   const resolvedAppearance = appearanceMode === 'system' ? (systemScheme === 'light' ? 'light' : 'dark') : appearanceMode;
   C = resolvedAppearance === 'light' ? LIGHT_COLORS : DARK_COLORS;
   styles = createStyles(C);
@@ -178,6 +185,7 @@ export default function App() {
   const pendingRef = useRef<Record<string, PendingIntent>>({});
   const retryTimersRef = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
   const connectingRef = useRef<Set<string>>(new Set());
+  const probingRef = useRef<Map<string, number>>(new Map());
   const reliabilityBatchRef = useRef<Set<string>>(new Set());
   const reliabilityAutoStartedRef = useRef(false);
   const chatListRef = useRef<FlatList<ChatMessage>>(null);
@@ -246,6 +254,7 @@ export default function App() {
     trustedPeerRef.current = peer;
     setTrustedPeer(peer);
     setTab('Chats');
+    setContactInfoOpen(false);
     setChatOpen(true);
     void Telemetry.markConversationRead(contact.deviceId).then(() => hydrateLocalState());
   }
@@ -277,6 +286,7 @@ export default function App() {
         restoredPending[item.id] = {
           localId: item.id,
           peerId: contact.peerId,
+          peerDeviceId: item.peerDeviceId,
           text: item.text,
           transportId: existingPending[item.id]?.transportId,
           attemptCount: item.attemptCount,
@@ -297,6 +307,16 @@ export default function App() {
         state: item.delivered ? 'delivered' : 'queued',
         transportId: item.mine ? item.id : undefined,
       })));
+      setMediaTransfers(current => {
+        const next: Record<string, MediaTransferView> = { ...current };
+        for (const item of state.media ?? []) {
+          const existing = next[item.assetId];
+          if (!existing || (item.updatedAt ?? 0) >= (existing.updatedAt ?? 0)) {
+            next[item.assetId] = { ...item } as MediaTransferView;
+          }
+        }
+        return next;
+      });
     } catch {
       setContacts([]);
     }
@@ -351,10 +371,13 @@ export default function App() {
         if (event.state === 'bluetooth-on') void recoverPendingTransports();
       }),
       Telemetry.addListener('onPeerSeen', event => {
-        const next = { ...peersRef.current, [event.peerId]: { ...event, lastSeen: Date.now() } };
+        const now = Date.now();
+        const next = { ...peersRef.current, [event.peerId]: { ...event, lastSeen: now } };
         peersRef.current = next;
         setPeers(next);
-        if (hasPendingForPeer(event.peerId) || payloadProbeLaunch) void ensureConnection(event.peerId);
+        // Trusted reconnect is owned by the native identity-aware discovery path so
+        // both phones do not initiate CoreBluetooth central connections simultaneously.
+        if (payloadProbeLaunch) void ensureConnection(event.peerId);
       }),
       Telemetry.addListener('onVerification', event => {
         connectingRef.current.delete(event.peerId);
@@ -362,15 +385,23 @@ export default function App() {
       }),
       Telemetry.addListener('onTrusted', event => {
         connectingRef.current.delete(event.peerId);
+        probingRef.current.delete(event.peerId);
         const peer = { peerId: event.peerId, deviceId: event.deviceId };
         trustedPeerRef.current = peer;
         setTrustedPeer(peer);
         setVerification(null);
         setSessionReady(true);
+        // Rebind undelivered intents immediately when CoreBluetooth gave this trusted
+        // device a new transient peerId. hydrateLocalState then persists the new binding.
+        for (const [id, intent] of Object.entries(pendingRef.current)) {
+          if (intent.peerDeviceId === event.deviceId) {
+            pendingRef.current[id] = { ...intent, peerId: event.peerId, transportId: undefined };
+          }
+        }
         hydrateLocalState();
         setChatOpen(true);
         void syncProfileToPeer(event.peerId, event.deviceId);
-        void flushPending(event.peerId);
+        setTimeout(() => void flushPending(event.peerId), 0);
       }),
       Telemetry.addListener('onMessage', event => {
         const peer = { peerId: event.peerId, deviceId: event.deviceId };
@@ -394,21 +425,30 @@ export default function App() {
         refreshReliabilityDiagnostics();
       }),
       Telemetry.addListener('onMedia', event => {
+        if (event.fileName === '__telemetry_media_probe.bin') return;
         if (event.fileName === '__telemetry_profile_avatar.jpg') {
           if (event.state === 'incomingReady' && event.peerDeviceId && event.localUri) {
             void Telemetry.setContactProfilePhoto(event.peerDeviceId, event.localUri).then(() => hydrateLocalState());
           }
           return;
         }
-        setMediaTransfers(current => ({
-          ...current,
-          [event.assetId]: {
-            ...current[event.assetId],
-            ...event,
-            localUri: event.localUri ?? current[event.assetId]?.localUri,
-            updatedAt: Date.now(),
-          },
-        }));
+        setMediaTransfers(current => {
+          const existing = current[event.assetId];
+          const existingTerminal = existing?.state === 'outgoingComplete' || existing?.state === 'incomingReady';
+          const eventTerminal = event.state === 'outgoingComplete' || event.state === 'incomingReady';
+          const nextState = existingTerminal && !eventTerminal ? existing.state : event.state;
+          return {
+            ...current,
+            [event.assetId]: {
+              ...existing,
+              ...event,
+              state: nextState,
+              verified: existingTerminal || eventTerminal ? true : (event.verified ?? existing?.verified),
+              localUri: event.localUri ?? existing?.localUri,
+              updatedAt: Date.now(),
+            },
+          };
+        });
       }),
       Telemetry.addListener('onProfile', () => hydrateLocalState()),
       Telemetry.addListener('onNotificationOpen', event => {
@@ -476,7 +516,10 @@ export default function App() {
       void recoverPendingTransports();
     });
     const recoveryPulse = setInterval(() => {
-      if (AppState.currentState === 'active') void recoverPendingTransports();
+      if (AppState.currentState !== 'active') return;
+      void recoverPendingTransports();
+      const peerDeviceId = trustedPeerRef.current?.deviceId ?? contactsRef.current[0]?.deviceId;
+      if (peerDeviceId) void Telemetry.resumeMedia(peerDeviceId);
     }, 3000);
 
     return () => {
@@ -513,6 +556,27 @@ export default function App() {
   const activeMediaTransfers = Object.values(mediaTransfers)
     .filter(item => !trustedPeer?.deviceId || !item.peerDeviceId || item.peerDeviceId === trustedPeer.deviceId)
     .sort((a, b) => a.updatedAt - b.updatedAt);
+  const photoMediaTransfers = activeMediaTransfers.filter(item =>
+    item.kind === 'photo' && !!item.localUri && (item.state === 'outgoingComplete' || item.state === 'incomingReady')
+  );
+  const mediaViewerIndex = Math.max(0, photoMediaTransfers.findIndex(item => item.assetId === mediaViewerAssetId));
+  const verifiedSharedMedia = activeMediaTransfers.filter(item => item.state === 'outgoingComplete' || item.state === 'incomingReady');
+
+  function openSharedMediaGallery() {
+    const latest = photoMediaTransfers[photoMediaTransfers.length - 1];
+    if (!latest) {
+      Alert.alert('Media gallery', 'No verified photos have been shared in this conversation yet.');
+      return;
+    }
+    setMediaViewerAssetId(latest.assetId);
+  }
+
+  function openCall(mode: 'voice' | 'video') {
+    setCallMode(mode);
+    setContactInfoOpen(false);
+    setChatOpen(false);
+    setTab('Calls');
+  }
 
   const routeLabel = sessionReady
     ? 'CONNECTED · ENCRYPTED'
@@ -693,7 +757,7 @@ export default function App() {
     }
   }
 
-  async function pickAndSendMedia(kind: 'photo' | 'video' | 'file') {
+  async function pickAndSendMedia(source: 'camera' | 'library' | 'file') {
     const peer = trustedPeerRef.current;
     if (!peer) {
       Alert.alert('Telemetry', 'Open a trusted conversation before attaching media.');
@@ -701,48 +765,69 @@ export default function App() {
     }
     try {
       setAttachmentMenuOpen(false);
-      await new Promise(resolve => setTimeout(resolve, 140));
+      Keyboard.dismiss();
+      await new Promise(resolve => setTimeout(resolve, 180));
       let uri = '';
       let mimeType = 'application/octet-stream';
       let fileName = `telemetry-${Date.now()}`;
+      let byteLength = 0;
+      let kind: 'photo' | 'video' | 'file' = 'file';
 
-      if (kind === 'photo' || kind === 'video') {
+      if (source === 'camera') {
+        const permission = await ImagePicker.requestCameraPermissionsAsync();
+        if (!permission.granted) {
+          Alert.alert('Camera permission', 'Allow camera access in Settings to take a photo.');
+          return;
+        }
+        const result = await ImagePicker.launchCameraAsync({ mediaTypes: ['images'], quality: 0.92 });
+        if (result.canceled || !result.assets?.[0]) return;
+        const asset = result.assets[0];
+        kind = 'photo';
+        uri = asset.uri;
+        mimeType = asset.mimeType || 'image/jpeg';
+        fileName = asset.fileName || `photo-${Date.now()}.jpg`;
+        byteLength = asset.fileSize || 0;
+      } else if (source === 'library') {
         const permission = await ImagePicker.requestMediaLibraryPermissionsAsync();
         if (!permission.granted) {
           Alert.alert('Photos permission', 'Allow photo library access in Settings to attach photos or videos.');
           return;
         }
         const result = await ImagePicker.launchImageLibraryAsync({
-          mediaTypes: kind === 'photo' ? ['images'] : ['videos'],
+          mediaTypes: ['images', 'videos'],
           quality: 1,
           allowsEditing: false,
         });
         if (result.canceled || !result.assets?.[0]) return;
         const asset = result.assets[0];
+        kind = asset.type === 'video' ? 'video' : 'photo';
         uri = asset.uri;
         mimeType = asset.mimeType || (kind === 'photo' ? 'image/jpeg' : 'video/mp4');
         fileName = asset.fileName || `${kind}-${Date.now()}${kind === 'photo' ? '.jpg' : '.mp4'}`;
+        byteLength = asset.fileSize || 0;
       } else {
-        const result = await DocumentPicker.getDocumentAsync({
-          copyToCacheDirectory: true,
-          multiple: false,
-          type: '*/*',
-        });
+        const result = await DocumentPicker.getDocumentAsync({ copyToCacheDirectory: true, multiple: false, type: '*/*' });
         if (result.canceled || !result.assets?.[0]) return;
         const asset = result.assets[0];
+        kind = 'file';
         uri = asset.uri;
         mimeType = asset.mimeType || 'application/octet-stream';
         fileName = asset.name || `file-${Date.now()}`;
+        byteLength = asset.size || 0;
       }
 
       const assetId = await Telemetry.sendMedia(peer.deviceId, uri, kind, mimeType, fileName);
-      setMediaTransfers(current => current[assetId] ? {
+      setMediaTransfers(current => ({
         ...current,
-        [assetId]: { ...current[assetId], localUri: current[assetId].localUri || uri, updatedAt: Date.now() },
-      } : current);
-      void ensureRadio()
-        .then(() => Telemetry.resumeMedia(peer.deviceId))
-        .catch(() => undefined);
+        [assetId]: current[assetId] ? {
+          ...current[assetId], localUri: current[assetId].localUri || uri, updatedAt: Date.now(),
+        } : {
+          state: 'outgoingQueued', assetId, kind, fileName, byteLength, peerDeviceId: peer.deviceId,
+          totalChunks: byteLength > 0 ? Math.max(1, Math.ceil(byteLength / (256 * 1024))) : 1,
+          localUri: uri, message: 'Queued securely', updatedAt: Date.now(),
+        },
+      }));
+      void ensureRadio().then(() => Telemetry.resumeMedia(peer.deviceId)).catch(() => undefined);
     } catch (error) {
       const message = String(error);
       if (/trusted peer key material/i.test(message)) {
@@ -754,7 +839,41 @@ export default function App() {
   }
 
   function openAttachmentMenu() {
-    setAttachmentMenuOpen(true);
+    Keyboard.dismiss();
+    setAttachmentMenuOpen(current => !current);
+  }
+
+  async function enqueueSharedText(text: string) {
+    const peer = trustedPeerRef.current;
+    const clean = text.trim();
+    if (!peer || !clean) return;
+    const localId = await Telemetry.enqueueText(peer.peerId, peer.deviceId, clean);
+    pendingRef.current[localId] = { localId, peerId: peer.peerId, peerDeviceId: peer.deviceId, text: clean };
+    setMessages(current => [...current, {
+      id: localId, text: clean, mine: true, peerDeviceId: peer.deviceId, timestamp: Date.now(), state: 'queued',
+    }]);
+    void flushPending(peer.peerId);
+  }
+
+  async function shareContact() {
+    try {
+      setAttachmentMenuOpen(false);
+      Keyboard.dismiss();
+      const permission = await Contacts.requestPermissionsAsync();
+      if (!permission.granted) {
+        Alert.alert('Contacts permission', 'Allow Contacts access in Settings to share a contact.');
+        return;
+      }
+      const contact = await Contacts.presentContactPickerAsync();
+      if (!contact) return;
+      const name = contact.name || [contact.firstName, contact.lastName].filter(Boolean).join(' ') || 'Contact';
+      const phones = (contact.phoneNumbers ?? []).map(item => item.number).filter((value): value is string => !!value).slice(0, 3);
+      const emails = (contact.emails ?? []).map(item => item.email).filter((value): value is string => !!value).slice(0, 2);
+      const lines = [`📇 ${name}`, ...phones.map(value => `☎ ${value}`), ...emails.map(value => `✉ ${value}`)];
+      await enqueueSharedText(lines.join('\n'));
+    } catch (error) {
+      Alert.alert('Share contact', String(error));
+    }
   }
 
   async function changeAppearance(mode: AppearanceMode) {
@@ -768,22 +887,10 @@ export default function App() {
 
   async function sendText() {
     const text = draft.trim();
-    const peer = trustedPeerRef.current;
-    if (!text || !peer) return;
-
+    if (!text) return;
     try {
-      const localId = await Telemetry.enqueueText(peer.peerId, peer.deviceId, text);
-      pendingRef.current[localId] = { localId, peerId: peer.peerId, text };
-      setMessages(current => [...current, {
-        id: localId,
-        text,
-        mine: true,
-        peerDeviceId: peer.deviceId,
-        timestamp: Date.now(),
-        state: 'queued',
-      }]);
+      await enqueueSharedText(text);
       setDraft('');
-      void flushPending(peer.peerId);
     } catch (error) {
       Alert.alert('Telemetry', String(error));
     }
@@ -808,12 +915,16 @@ export default function App() {
   async function syncProfileToPeer(peerId: string, deviceId: string, currentProfile: LocalProfile = profileRef.current) {
     try {
       await Telemetry.sendProfile(peerId, deviceId, currentProfile.displayName, currentProfile.templateId ?? null);
-      if (currentProfile.photoUri) {
+    } catch {
+      // Text/template profile metadata needs the live secure session and will retry later.
+    }
+    if (currentProfile.photoUri) {
+      try {
         await Telemetry.sendMedia(deviceId, currentProfile.photoUri, 'photo', 'image/jpeg', '__telemetry_profile_avatar.jpg');
         void Telemetry.resumeMedia(deviceId);
+      } catch {
+        // Avatar media is independently retryable through the persistent trusted media key.
       }
-    } catch {
-      // Profile sync is best-effort and retries naturally on the next trusted session.
     }
   }
 
@@ -865,7 +976,7 @@ export default function App() {
       for (let index = 1; index <= total; index += 1) {
         const text = `[${transport.toUpperCase()} TEST ${batchId}] ${String(index).padStart(3, '0')}/${String(total).padStart(3, '0')}`;
         const localId = await Telemetry.enqueueText(peer.peerId, peer.deviceId, text);
-        pendingRef.current[localId] = { localId, peerId: peer.peerId, text, testTransport: transport };
+        pendingRef.current[localId] = { localId, peerId: peer.peerId, peerDeviceId: peer.deviceId, text, testTransport: transport };
         ids.push(localId);
       }
       reliabilityBatchRef.current = new Set(ids);
@@ -978,10 +1089,23 @@ export default function App() {
           <ScrollView contentContainerStyle={styles.page}>
             <Text style={styles.title}>Calls</Text>
             <Text style={styles.copy}>Voice and video sessions between trusted peers will appear here.</Text>
-            <View style={styles.card}>
-              <Text style={styles.cardTitle}>Voice · M1.6</Text>
-              <Text style={styles.cardCopy}>Encrypted call signaling and direct Wi-Fi media are being wired for iOS. Video follows on the same authenticated session.</Text>
-            </View>
+            {trustedPeer ? (
+              <View style={styles.card}>
+                <View style={styles.rowBetween}>
+                  <PeerAvatar name={activePeerName} photoUri={activeContact?.profilePhotoUri} templateId={activeContact?.profileTemplateId} trusted size={48} />
+                  <View style={styles.flex}>
+                    <Text style={styles.cardTitle}>{activePeerName}</Text>
+                    <Text style={styles.cardCopy}>{callMode === 'video' ? 'Video call selected' : callMode === 'voice' ? 'Voice call selected' : 'Trusted contact'}</Text>
+                  </View>
+                </View>
+                <Text style={styles.cardCopy}>Encrypted iOS call signaling is the next runtime milestone. Media transport stays direct peer-to-peer and does not pass through the cloud.</Text>
+              </View>
+            ) : (
+              <View style={styles.card}>
+                <Text style={styles.cardTitle}>Voice · M1.6</Text>
+                <Text style={styles.cardCopy}>Open a trusted conversation first, then use the phone or video button in the chat header.</Text>
+              </View>
+            )}
           </ScrollView>
         )}
 
@@ -1370,14 +1494,24 @@ export default function App() {
               <Pressable style={styles.chatBackButton} onPress={() => setChatOpen(false)} hitSlop={10}>
                 <SymbolView name={'chevron.left' as any} size={22} tintColor={C.blue} weight="semibold" />
               </Pressable>
-              <Pressable style={styles.chatPeerHeader} onLongPress={() => activeContact && void renameContact(activeContact)}>
+              <Pressable style={styles.chatPeerHeader} onPress={() => setContactInfoOpen(true)} onLongPress={() => activeContact && void renameContact(activeContact)}>
                 <PeerAvatar name={activePeerName} photoUri={activeContact?.profilePhotoUri} templateId={activeContact?.profileTemplateId} trusted size={36} />
-                <View>
-                  <Text style={styles.chatPeerName}>{activePeerName}</Text>
+                <View style={styles.chatPeerText}>
+                  <Text style={styles.chatPeerName} numberOfLines={1}>{activePeerName}</Text>
                   <Text style={styles.chatPeerRoute}>{chatRouteLabel}</Text>
                 </View>
               </Pressable>
-              <View style={styles.headerSpacer} />
+              <View style={styles.chatHeaderActions}>
+                <Pressable style={styles.chatHeaderAction} onPress={openSharedMediaGallery} hitSlop={6}>
+                  <SymbolView name={'photo.on.rectangle.angled' as any} size={18} tintColor={C.text} />
+                </Pressable>
+                <Pressable style={styles.chatHeaderAction} onPress={() => openCall('video')} hitSlop={6}>
+                  <SymbolView name={'video.fill' as any} size={18} tintColor={C.text} />
+                </Pressable>
+                <Pressable style={styles.chatHeaderAction} onPress={() => openCall('voice')} hitSlop={6}>
+                  <SymbolView name={'phone.fill' as any} size={18} tintColor={C.text} />
+                </Pressable>
+              </View>
             </View>
             {activeHasPending && !sessionReady && (
               <View style={styles.offlineBanner}>
@@ -1416,17 +1550,18 @@ export default function App() {
               )}
               ListFooterComponent={activeMediaTransfers.length ? (
                 <View style={styles.mediaTransferList}>
-                  {activeMediaTransfers.map(item => <MediaTransferCard key={item.assetId} item={item} />)}
+                  {activeMediaTransfers.map(item => <MediaTransferCard key={item.assetId} item={item} onOpenPhoto={() => setMediaViewerAssetId(item.assetId)} />)}
                 </View>
               ) : null}
             />
             <View style={styles.composer}>
               <Pressable style={styles.attachButton} onPress={openAttachmentMenu}>
-                <SymbolView name={'plus' as any} size={22} tintColor={C.blue} weight="bold" />
+                <SymbolView name={(attachmentMenuOpen ? 'xmark' : 'plus') as any} size={22} tintColor={C.blue} weight="bold" />
               </Pressable>
               <TextInput
                 value={draft}
                 onChangeText={setDraft}
+                onFocus={() => setAttachmentMenuOpen(false)}
                 placeholder="Message offline…"
                 placeholderTextColor={C.muted}
                 style={styles.input}
@@ -1439,48 +1574,165 @@ export default function App() {
               </Pressable>
             </View>
             {attachmentMenuOpen && (
-        <View style={styles.attachmentBackdrop}>
-          <Pressable style={styles.attachmentDismissLayer} onPress={() => setAttachmentMenuOpen(false)} />
-          <BlurView intensity={55} tint={resolvedAppearance === 'light' ? 'light' : 'dark'} style={styles.attachmentSheet}>
-            <Image source={GLASS_NOISE} resizeMode="repeat" style={styles.glassNoiseStrong} />
-            <Text style={styles.attachmentTitle}>Attach securely</Text>
-            <Text style={styles.attachmentCopy}>Encrypted locally before transfer. Offline items stay queued.</Text>
-            <View style={styles.attachmentActions}>
-              {[
-                ['photo', 'photo.fill', 'Photo'],
-                ['video', 'video.fill', 'Video'],
-                ['file', 'doc.fill', 'File'],
-              ].map(([kind, icon, label]) => (
-                <Pressable key={kind} style={styles.attachmentAction} onPress={() => void pickAndSendMedia(kind as 'photo' | 'video' | 'file')}>
-                  <SymbolView name={icon as any} size={23} tintColor={C.blue} />
-                  <Text style={styles.attachmentActionText}>{label}</Text>
-                </Pressable>
-              ))}
-            </View>
-          </BlurView>
-        </View>
+              <BlurView intensity={46} tint={resolvedAppearance === 'light' ? 'light' : 'dark'} style={styles.attachmentTray}>
+                <Image source={GLASS_NOISE} resizeMode="repeat" style={styles.glassNoiseStrong} />
+                <View style={styles.attachmentActions}>
+                  {[
+                    ['camera', 'camera.fill', 'Camera'],
+                    ['library', 'photo.on.rectangle.angled', 'Photos'],
+                    ['file', 'doc.fill', 'Document'],
+                    ['contact', 'person.crop.circle.fill', 'Contact'],
+                  ].map(([kind, icon, label]) => (
+                    <Pressable
+                      key={kind}
+                      style={styles.attachmentAction}
+                      onPress={() => kind === 'contact' ? void shareContact() : void pickAndSendMedia(kind as 'camera' | 'library' | 'file')}
+                    >
+                      <View style={styles.attachmentIconCircle}>
+                        <SymbolView name={icon as any} size={27} tintColor={C.blue} />
+                      </View>
+                      <Text style={styles.attachmentActionText}>{label}</Text>
+                    </Pressable>
+                  ))}
+                </View>
+              </BlurView>
             )}
           </KeyboardAvoidingView>
+          {contactInfoOpen && (
+            <View style={styles.contactInfoOverlay}>
+              <View style={styles.contactInfoHeader}>
+                <Pressable style={styles.chatBackButton} onPress={() => setContactInfoOpen(false)} hitSlop={10}>
+                  <SymbolView name={'chevron.left' as any} size={22} tintColor={C.text} weight="semibold" />
+                </Pressable>
+                <Text style={styles.contactInfoHeaderTitle}>Contact info</Text>
+                <Pressable style={styles.contactInfoEdit} onPress={() => activeContact && void renameContact(activeContact)}>
+                  <Text style={styles.contactInfoEditText}>Edit</Text>
+                </Pressable>
+              </View>
+              <ScrollView contentContainerStyle={styles.contactInfoPage}>
+                <View style={styles.contactHero}>
+                  <PeerAvatar name={activePeerName} photoUri={activeContact?.profilePhotoUri} templateId={activeContact?.profileTemplateId} trusted size={118} />
+                  <Text style={styles.contactHeroName}>{activePeerName}</Text>
+                  <Text style={styles.contactHeroStatus}>{sessionReady ? 'Connected · encrypted' : 'Trusted Telemetry contact'}</Text>
+                </View>
+                <View style={styles.contactActionRow}>
+                  <Pressable style={styles.contactAction} onPress={() => openCall('voice')}>
+                    <SymbolView name={'phone.fill' as any} size={23} tintColor={C.blue} />
+                    <Text style={styles.contactActionLabel}>Voice</Text>
+                  </Pressable>
+                  <Pressable style={styles.contactAction} onPress={() => openCall('video')}>
+                    <SymbolView name={'video.fill' as any} size={23} tintColor={C.blue} />
+                    <Text style={styles.contactActionLabel}>Video</Text>
+                  </Pressable>
+                  <Pressable style={styles.contactAction} onPress={openSharedMediaGallery}>
+                    <SymbolView name={'photo.on.rectangle.angled' as any} size={23} tintColor={C.blue} />
+                    <Text style={styles.contactActionLabel}>Media</Text>
+                  </Pressable>
+                </View>
+                <View style={styles.contactSection}>
+                  <Pressable style={styles.contactRow} onPress={openSharedMediaGallery}>
+                    <SymbolView name={'photo.on.rectangle.angled' as any} size={21} tintColor={C.text} />
+                    <View style={styles.flex}>
+                      <Text style={styles.contactRowTitle}>Media, links and docs</Text>
+                      <Text style={styles.contactRowCopy}>{verifiedSharedMedia.length} verified item{verifiedSharedMedia.length === 1 ? '' : 's'} stored locally</Text>
+                    </View>
+                    <SymbolView name={'chevron.right' as any} size={14} tintColor={C.muted} />
+                  </Pressable>
+                  <View style={styles.contactDivider} />
+                  <View style={styles.contactRow}>
+                    <SymbolView name={'bell.fill' as any} size={20} tintColor={C.text} />
+                    <View style={styles.flex}>
+                      <Text style={styles.contactRowTitle}>Notifications</Text>
+                      <Text style={styles.contactRowCopy}>Telemetry default · custom incoming sound</Text>
+                    </View>
+                  </View>
+                </View>
+                <View style={styles.contactSection}>
+                  <View style={styles.contactRow}>
+                    <SymbolView name={'lock.shield.fill' as any} size={21} tintColor={C.text} />
+                    <View style={styles.flex}>
+                      <Text style={styles.contactRowTitle}>Security</Text>
+                      <Text style={styles.contactRowCopy}>Trusted cryptographic identity · end-to-end encrypted</Text>
+                    </View>
+                  </View>
+                  <View style={styles.contactDivider} />
+                  <View style={styles.contactRow}>
+                    <SymbolView name={'iphone' as any} size={21} tintColor={C.text} />
+                    <View style={styles.flex}>
+                      <Text style={styles.contactRowTitle}>Contact details</Text>
+                      <Text style={styles.contactRowCopy} numberOfLines={2}>{trustedPeer?.deviceId ?? 'Trusted peer'}</Text>
+                    </View>
+                  </View>
+                  <View style={styles.contactDivider} />
+                  <View style={styles.contactRow}>
+                    <SymbolView name={'network' as any} size={21} tintColor={C.text} />
+                    <View style={styles.flex}>
+                      <Text style={styles.contactRowTitle}>Connection</Text>
+                      <Text style={styles.contactRowCopy}>{chatRouteLabel}</Text>
+                    </View>
+                  </View>
+                </View>
+                <Text style={styles.contactPrivacy}>Private message and media content stay on the paired devices. The control plane receives no chat body or media bytes.</Text>
+              </ScrollView>
+            </View>
+          )}
         </SafeAreaView>
+      </Modal>
+
+      <Modal visible={!!mediaViewerAssetId} transparent animationType="fade" onRequestClose={() => setMediaViewerAssetId(null)}>
+        <View style={styles.mediaViewerBackdrop}>
+          <Pressable style={styles.mediaViewerClose} onPress={() => setMediaViewerAssetId(null)} hitSlop={12}>
+            <SymbolView name={'xmark' as any} size={24} tintColor="#FFF" weight="semibold" />
+          </Pressable>
+          <FlatList
+            key={mediaViewerAssetId ?? 'viewer'}
+            data={photoMediaTransfers}
+            horizontal
+            pagingEnabled
+            showsHorizontalScrollIndicator={false}
+            initialScrollIndex={mediaViewerIndex}
+            getItemLayout={(_, index) => ({ length: viewportWidth, offset: viewportWidth * index, index })}
+            keyExtractor={item => item.assetId}
+            renderItem={({ item }) => (
+              <View style={[styles.mediaViewerPage, { width: viewportWidth, height: viewportHeight }]}>
+                <Image source={{ uri: item.localUri }} style={styles.mediaViewerImage} resizeMode="contain" />
+              </View>
+            )}
+          />
+        </View>
       </Modal>
     </SafeAreaView>
   );
 }
 
-function MediaTransferCard({ item }: { item: MediaTransferView }) {
+function MediaTransferCard({ item, onOpenPhoto }: { item: MediaTransferView; onOpenPhoto?: () => void }) {
+  const [previewFailed, setPreviewFailed] = useState(false);
   const mine = item.state.startsWith('outgoing') || item.state === 'paused';
-  const complete = item.state === 'outgoingComplete' || item.state === 'incomingReady';
   const done = item.acknowledgedChunks ?? item.receivedChunks ?? 0;
   const total = Math.max(1, item.totalChunks || 1);
+  const ackImpliesVerified = mine && total > 0 && done >= total;
+  const complete = item.state === 'outgoingComplete' || item.state === 'incomingReady' || ackImpliesVerified;
   const percent = complete ? 100 : Math.min(99, Math.round((done / total) * 100));
-  const label = item.state === 'paused' ? 'Paused · waiting for Wi-Fi'
-    : item.state === 'incomingReady' ? 'Received · SHA-256 verified'
-      : item.state === 'outgoingComplete' ? 'Sent securely'
+  const label = item.state === 'paused' ? 'Queued · reconnecting secure path'
+    : item.state === 'incomingReady' ? 'Received · verified'
+      : (item.state === 'outgoingComplete' || ackImpliesVerified) ? 'Delivered · verified'
         : `${percent}% · ${done}/${total} chunks`;
+
+  if (item.kind === 'photo' && item.localUri && complete && !previewFailed) {
+    return (
+      <Pressable style={[styles.mediaPhotoBubble, mine ? styles.mediaMine : styles.mediaTheirs]} onPress={onOpenPhoto}>
+        <Image source={{ uri: item.localUri }} style={styles.mediaPhotoSquare} resizeMode="cover" onError={() => setPreviewFailed(true)} />
+        <View style={styles.mediaPhotoBadge}>
+          <SymbolView name={'checkmark.shield.fill' as any} size={14} tintColor="#FFF" />
+        </View>
+      </Pressable>
+    );
+  }
+
   return (
     <BlurView intensity={30} tint={C === LIGHT_COLORS ? 'light' : 'dark'} style={[styles.mediaBubble, mine ? styles.mediaMine : styles.mediaTheirs]}>
       <Image source={GLASS_NOISE} resizeMode="repeat" style={styles.glassNoise} />
-      {item.kind === 'photo' && item.localUri ? <Image source={{ uri: item.localUri }} style={styles.mediaPreview} resizeMode="cover" /> : (
+      {item.kind === 'photo' && item.localUri && !previewFailed ? <Image source={{ uri: item.localUri }} style={styles.mediaPreview} resizeMode="cover" onError={() => setPreviewFailed(true)} /> : (
         <View style={styles.mediaFileIcon}>
           <SymbolView name={(item.kind === 'video' ? 'video.fill' : 'doc.fill') as any} size={28} tintColor={C.blue} />
         </View>
@@ -1779,10 +2031,31 @@ function createStyles(C: ThemeColors) {
   secondary: { height: 48, alignItems: 'center', justifyContent: 'center', marginTop: 6 },
   chatHeader: { height: 68, paddingHorizontal: 14, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: C.line },
   chatBackButton: { width: 42, height: 42, borderRadius: 21, alignItems: 'center', justifyContent: 'center' },
-  chatPeerHeader: { position: 'absolute', left: 58, right: 58, minHeight: 48, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 9 },
+  chatPeerHeader: { flex: 1, minHeight: 48, flexDirection: 'row', alignItems: 'center', gap: 8, marginLeft: 2, marginRight: 6, minWidth: 0 },
+  chatPeerText: { flex: 1, minWidth: 0 },
+  chatHeaderActions: { flexDirection: 'row', alignItems: 'center', gap: 5 },
+  chatHeaderAction: { width: 34, height: 34, borderRadius: 17, alignItems: 'center', justifyContent: 'center', backgroundColor: C.glass, borderWidth: StyleSheet.hairlineWidth, borderColor: C.line },
   chatPeerName: { color: C.text, fontSize: 15, fontWeight: '800' },
   chatPeerRoute: { color: C.cyan, fontSize: 8, fontWeight: '800', letterSpacing: 0.7, marginTop: 2 },
   headerSpacer: { width: 42 },
+  contactInfoOverlay: { position: 'absolute', left: 0, right: 0, top: 0, bottom: 0, zIndex: 200, backgroundColor: C.ink },
+  contactInfoHeader: { height: 68, paddingHorizontal: 14, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: C.line },
+  contactInfoHeaderTitle: { color: C.text, fontSize: 18, fontWeight: '800' },
+  contactInfoEdit: { minWidth: 54, height: 38, borderRadius: 19, alignItems: 'center', justifyContent: 'center', backgroundColor: C.glass, borderWidth: 1, borderColor: C.line },
+  contactInfoEditText: { color: C.text, fontSize: 14, fontWeight: '700' },
+  contactInfoPage: { paddingHorizontal: 16, paddingBottom: 40, gap: 16 },
+  contactHero: { alignItems: 'center', paddingTop: 24, paddingBottom: 4 },
+  contactHeroName: { color: C.text, fontSize: 27, fontWeight: '800', marginTop: 14, textAlign: 'center' },
+  contactHeroStatus: { color: C.muted, fontSize: 13, marginTop: 5, textAlign: 'center' },
+  contactActionRow: { flexDirection: 'row', gap: 10 },
+  contactAction: { flex: 1, minHeight: 84, borderRadius: 20, alignItems: 'center', justifyContent: 'center', gap: 8, backgroundColor: C.card, borderWidth: 1, borderColor: C.line },
+  contactActionLabel: { color: C.text, fontSize: 12, fontWeight: '700' },
+  contactSection: { borderRadius: 22, overflow: 'hidden', backgroundColor: C.card, borderWidth: 1, borderColor: C.line },
+  contactRow: { minHeight: 72, paddingHorizontal: 16, paddingVertical: 13, flexDirection: 'row', alignItems: 'center', gap: 13 },
+  contactRowTitle: { color: C.text, fontSize: 15, fontWeight: '700' },
+  contactRowCopy: { color: C.muted, fontSize: 11, lineHeight: 16, marginTop: 3 },
+  contactDivider: { height: StyleSheet.hairlineWidth, backgroundColor: C.line, marginLeft: 50 },
+  contactPrivacy: { color: C.muted, fontSize: 11, lineHeight: 17, textAlign: 'center', paddingHorizontal: 14, paddingTop: 2 },
   offlineBanner: { marginHorizontal: 12, marginTop: 10, paddingHorizontal: 13, paddingVertical: 11, borderRadius: 15, flexDirection: 'row', alignItems: 'center', gap: 10, backgroundColor: C.card2, borderWidth: 1, borderColor: '#2F86FF88' },
   offlineBannerTitle: { color: C.text, fontSize: 12, fontWeight: '800' },
   offlineBannerCopy: { color: C.muted, fontSize: 11, lineHeight: 15, marginTop: 2 },
@@ -1806,6 +2079,9 @@ function createStyles(C: ThemeColors) {
   mediaMine: { alignSelf: 'flex-end', backgroundColor: resolvedMineGlass(C), borderColor: '#2F86FF66' },
   mediaTheirs: { alignSelf: 'flex-start', backgroundColor: C.card2, borderColor: C.line },
   mediaPreview: { width: 76, height: 76, borderRadius: 12, backgroundColor: C.card2 },
+  mediaPhotoBubble: { width: 236, height: 236, borderRadius: 20, overflow: 'hidden', borderWidth: 1, position: 'relative' },
+  mediaPhotoSquare: { width: '100%', height: '100%', backgroundColor: C.card2 },
+  mediaPhotoBadge: { position: 'absolute', right: 9, bottom: 9, width: 28, height: 28, borderRadius: 14, alignItems: 'center', justifyContent: 'center', backgroundColor: 'rgba(0,0,0,0.58)' },
   mediaFileIcon: { width: 76, height: 76, borderRadius: 12, backgroundColor: C.card2, alignItems: 'center', justifyContent: 'center' },
   mediaInfo: { flex: 1, minWidth: 0, justifyContent: 'center' },
   mediaFileName: { color: C.text, fontSize: 13, fontWeight: '800' },
@@ -1823,9 +2099,15 @@ function createStyles(C: ThemeColors) {
   attachmentSheet: { borderRadius: 26, padding: 18, overflow: 'hidden', borderWidth: 1, borderColor: C.line, backgroundColor: C.glassStrong },
   attachmentTitle: { color: C.text, fontSize: 18, fontWeight: '800' },
   attachmentCopy: { color: C.muted, fontSize: 11, lineHeight: 16, marginTop: 4 },
-  attachmentActions: { flexDirection: 'row', gap: 10, marginTop: 16 },
-  attachmentAction: { flex: 1, minHeight: 72, borderRadius: 18, alignItems: 'center', justifyContent: 'center', gap: 7, backgroundColor: C.glass, borderWidth: 1, borderColor: C.line },
-  attachmentActionText: { color: C.text, fontSize: 11, fontWeight: '800' },
+  attachmentTray: { minHeight: 178, paddingHorizontal: 14, paddingTop: 18, paddingBottom: 22, overflow: 'hidden', borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: C.line, backgroundColor: C.glassStrong },
+  attachmentActions: { flexDirection: 'row', alignItems: 'flex-start', justifyContent: 'space-between', gap: 8 },
+  attachmentAction: { flex: 1, minHeight: 108, alignItems: 'center', justifyContent: 'flex-start', gap: 10 },
+  attachmentIconCircle: { width: 66, height: 66, borderRadius: 33, alignItems: 'center', justifyContent: 'center', backgroundColor: C.card2, borderWidth: 1, borderColor: C.line },
+  attachmentActionText: { color: C.text, fontSize: 11, fontWeight: '700', textAlign: 'center' },
+  mediaViewerBackdrop: { flex: 1, backgroundColor: '#000' },
+  mediaViewerClose: { position: 'absolute', top: 54, right: 20, width: 44, height: 44, borderRadius: 22, alignItems: 'center', justifyContent: 'center', backgroundColor: 'rgba(0,0,0,0.52)', zIndex: 20 },
+  mediaViewerPage: { alignItems: 'center', justifyContent: 'center', backgroundColor: '#000' },
+  mediaViewerImage: { width: '100%', height: '100%' },
   send: { width: 48, height: 48, borderRadius: 24, backgroundColor: C.blue, alignItems: 'center', justifyContent: 'center' },
   sendDisabled: { opacity: 0.38 },
   });

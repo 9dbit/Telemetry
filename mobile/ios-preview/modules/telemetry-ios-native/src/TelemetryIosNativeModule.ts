@@ -44,6 +44,7 @@ declare class TelemetryIosNativeModule extends NativeModule<TelemetryEvents> {
   startOffline(): Promise<void>;
   stopOffline(): Promise<void>;
   connect(peerId: string): Promise<void>;
+  probePeer(peerId: string): Promise<void>;
   recoverTransport(peerId: string): Promise<void>;
   trustPeer(deviceId: string): Promise<boolean>;
   enqueueText(peerId: string, peerDeviceId: string, text: string): Promise<string>;

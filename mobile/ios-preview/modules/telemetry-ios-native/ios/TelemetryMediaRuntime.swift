@@ -159,12 +159,28 @@ final class TelemetryMediaRuntime {
       mimeType: mimeType,
       fileName: fileName
     )
-    emitMedia(state: "outgoingQueued", record: prepared, extra: ["localUri": fileURL.absoluteString])
+    // Picker/cache URLs are ephemeral. Preserve a durable local copy inside
+    // Application Support so the sender's preview survives picker dismissal,
+    // tab changes, app relaunches and later gallery hydration.
+    let previewURL = outgoingAssetDir(prepared.assetId)
+      .appendingPathComponent("preview-\(Self.safeFileName(fileName))")
+    var previewUri = fileURL.absoluteString
+    do {
+      if previewURL.standardizedFileURL != fileURL.standardizedFileURL {
+        try? FileManager.default.removeItem(at: previewURL)
+        try FileManager.default.copyItem(at: fileURL, to: previewURL)
+      }
+      previewUri = previewURL.absoluteString
+    } catch {
+      // Transfer integrity uses encrypted chunks already persisted below. A preview
+      // copy failure must not discard the queued media; UI can fall back to a card.
+    }
+    emitMedia(state: "outgoingQueued", record: prepared, extra: ["localUri": previewUri])
     guard wifiAvailable(peerDeviceId) else {
       emitMedia(
         state: "paused",
         record: prepared,
-        extra: ["message": "Queued securely. Waiting for a Wi-Fi-class peer path."]
+        extra: ["message": "Queued securely. Waiting for a direct peer path."]
       )
       return prepared.assetId
     }
@@ -354,7 +370,7 @@ final class TelemetryMediaRuntime {
       throw TelemetryMediaError.message("Trusted peer key material is unavailable")
     }
     guard wifiAvailable(record.peerDeviceId) else {
-      throw TelemetryMediaError.message("Wi-Fi peer is unavailable; transfer remains queued")
+      throw TelemetryMediaError.message("Direct peer path is unavailable; transfer remains queued")
     }
     let assetDir = outgoingAssetDir(record.assetId)
     let manifestWire = try Data(contentsOf: assetDir.appendingPathComponent("manifest.tce1"))
@@ -366,7 +382,7 @@ final class TelemetryMediaRuntime {
     for index in 0..<record.chunkCount {
       if record.acked.contains(index) { continue }
       guard wifiAvailable(record.peerDeviceId) else {
-        throw TelemetryMediaError.message("Wi-Fi peer disappeared; encrypted chunks remain queued")
+        throw TelemetryMediaError.message("Direct peer path disappeared; encrypted chunks remain queued")
       }
       let wire = try Data(contentsOf: outgoingChunkURL(assetDir: assetDir, index: index))
       let ackWire = try await sendFrame(record.peerDeviceId, wire)
@@ -378,7 +394,7 @@ final class TelemetryMediaRuntime {
     guard record.acked.count == record.chunkCount else {
       throw TelemetryMediaError.message("Media transfer paused with unacknowledged encrypted chunks")
     }
-    emitMedia(state: "outgoingComplete", record: record)
+    emitMedia(state: "outgoingComplete", record: record, extra: ["verified": true])
   }
 
   private func applyAckWire(

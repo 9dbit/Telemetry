@@ -25,6 +25,9 @@ final class TelemetryWifiTransport {
   private var listener: NWListener?
   private var browser: NWBrowser?
   private var endpoints: [String: NWEndpoint] = [:]
+  private var endpointLastSeen: [String: Date] = [:]
+  private var endpointRemovalWorkItems: [String: DispatchWorkItem] = [:]
+  private static let peerAvailabilityGrace: TimeInterval = 15
   private var localDeviceId = ""
   private var sentBytes = 0
   private var receivedBytes = 0
@@ -60,8 +63,11 @@ final class TelemetryWifiTransport {
     browser?.cancel()
     listener = nil
     browser = nil
-    let previous = endpoints.keys
+    let previous = Array(endpoints.keys)
     endpoints.removeAll()
+    endpointLastSeen.removeAll()
+    for work in endpointRemovalWorkItems.values { work.cancel() }
+    endpointRemovalWorkItems.removeAll()
     for deviceId in previous {
       onPeerChange?(deviceId, false)
     }
@@ -69,6 +75,16 @@ final class TelemetryWifiTransport {
 
   func isAvailable(deviceId: String) -> Bool {
     queue.sync { endpoints[deviceId] != nil }
+  }
+
+  func refreshDiscovery() {
+    queue.async { [weak self] in
+      guard let self else { return }
+      // A ready NWBrowser is already continuously watching Bonjour/AWDL. Restarting
+      // it on every retry creates discovery flapping, so only recreate it if absent.
+      guard self.browser == nil else { return }
+      self.startBrowser()
+    }
   }
 
   func armNextSendFailureForTest() {
@@ -107,18 +123,38 @@ final class TelemetryWifiTransport {
     }
     browser.browseResultsChangedHandler = { [weak self] results, _ in
       guard let self else { return }
-      var next: [String: NWEndpoint] = [:]
+      let now = Date()
+      var visible = Set<String>()
       for result in results {
         guard case let .service(name, _, _, _) = result.endpoint else { continue }
         let deviceId = Self.deviceId(fromServiceName: name)
         guard deviceId != self.localDeviceId else { continue }
-        next[deviceId] = result.endpoint
+        visible.insert(deviceId)
+        let wasAvailable = self.endpoints[deviceId] != nil
+        self.endpoints[deviceId] = result.endpoint
+        self.endpointLastSeen[deviceId] = now
+        self.endpointRemovalWorkItems[deviceId]?.cancel()
+        self.endpointRemovalWorkItems.removeValue(forKey: deviceId)
+        if !wasAvailable { self.onPeerChange?(deviceId, true) }
       }
-      let removed = Set(self.endpoints.keys).subtracting(next.keys)
-      let added = Set(next.keys).subtracting(self.endpoints.keys)
-      self.endpoints = next
-      for deviceId in removed { self.onPeerChange?(deviceId, false) }
-      for deviceId in added { self.onPeerChange?(deviceId, true) }
+
+      // Bonjour snapshots can briefly omit a peer while AWDL/Wi-Fi P2P is still valid.
+      // Keep the last service endpoint for a short grace period instead of flapping
+      // media transfers into "waiting for Wi-Fi" on every transient browse update.
+      let missing = Set(self.endpoints.keys).subtracting(visible)
+      for deviceId in missing where self.endpointRemovalWorkItems[deviceId] == nil {
+        let work = DispatchWorkItem { [weak self] in
+          guard let self else { return }
+          defer { self.endpointRemovalWorkItems.removeValue(forKey: deviceId) }
+          let lastSeen = self.endpointLastSeen[deviceId] ?? .distantPast
+          guard Date().timeIntervalSince(lastSeen) >= Self.peerAvailabilityGrace else { return }
+          guard self.endpoints.removeValue(forKey: deviceId) != nil else { return }
+          self.endpointLastSeen.removeValue(forKey: deviceId)
+          self.onPeerChange?(deviceId, false)
+        }
+        self.endpointRemovalWorkItems[deviceId] = work
+        self.queue.asyncAfter(deadline: .now() + Self.peerAvailabilityGrace, execute: work)
+      }
     }
     browser.start(queue: queue)
     self.browser = browser
@@ -132,7 +168,8 @@ final class TelemetryWifiTransport {
     queue.async { [weak self] in
       guard let self else { return }
       guard let endpoint = self.endpoints[deviceId] else {
-        completion(.failure(TelemetryWifiTransportError.message("Wi-Fi peer is unavailable")))
+        if self.browser == nil { self.startBrowser() }
+        completion(.failure(TelemetryWifiTransportError.message("Wi-Fi peer is unavailable; transfer remains queued")))
         return
       }
 

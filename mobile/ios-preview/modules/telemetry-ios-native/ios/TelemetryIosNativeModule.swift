@@ -10,6 +10,9 @@ private let serviceUUID = CBUUID(string: "F0A0C0DE-7E1E-4E7F-9A11-54454C454D59")
 private let helloUUID = CBUUID(string: "F0A0C0DE-7E1E-4E7F-9A11-54454C454D01")
 private let messageUUID = CBUUID(string: "F0A0C0DE-7E1E-4E7F-9A11-54454C454D02")
 private let receiptUUID = CBUUID(string: "F0A0C0DE-7E1E-4E7F-9A11-54454C454D03")
+private let bleMediaHeaderBytes = 49
+private let bleMediaMaxFrameBytes = 2 * 1024 * 1024
+private let bleMediaAssemblyTtlMs: Int64 = 90_000
 
 private let helloVersion = "telemetry/m1b/hello"
 private let sessionContext = "telemetry/m1b/session"
@@ -544,12 +547,30 @@ private struct LocalMessageRecord: Codable {
   var lastError: String? = nil
 }
 
+private struct LocalMediaRecord: Codable {
+  var assetId: String
+  var peerDeviceId: String
+  var kind: String
+  var fileName: String
+  var byteLength: Int64
+  var state: String
+  var totalChunks: Int
+  var acknowledgedChunks: Int? = nil
+  var receivedChunks: Int? = nil
+  var localUri: String? = nil
+  var sha256: String? = nil
+  var verified: Bool? = nil
+  var message: String? = nil
+  var updatedAt: Int64
+}
+
 private struct LocalVaultState: Codable {
   var version: Int = 1
   var profile: LocalProfileRecord? = nil
   var appearance: String? = nil
   var contacts: [LocalContactRecord] = []
   var messages: [LocalMessageRecord] = []
+  var media: [LocalMediaRecord]? = nil
 }
 
 private final class LocalVault {
@@ -583,8 +604,38 @@ private final class LocalVault {
   }
 
   func payload() -> String {
+    var payloadState = state
+    if var media = payloadState.media {
+      var repaired = false
+      for index in media.indices {
+        let existingValid: Bool = {
+          guard let uri = media[index].localUri, let url = URL(string: uri), url.isFileURL else { return false }
+          return FileManager.default.fileExists(atPath: url.path)
+        }()
+        if existingValid { continue }
+        let safeName = URL(fileURLWithPath: media[index].fileName).lastPathComponent.isEmpty
+          ? "attachment.bin" : URL(fileURLWithPath: media[index].fileName).lastPathComponent
+        let root = directoryURL.appendingPathComponent("media-v1", isDirectory: true)
+        let candidates = [
+          root.appendingPathComponent("outgoing/\(media[index].assetId)/preview-\(safeName)"),
+          root.appendingPathComponent("open/\(media[index].assetId)/\(safeName)")
+        ]
+        if let found = candidates.first(where: { FileManager.default.fileExists(atPath: $0.path) }) {
+          media[index].localUri = found.absoluteString
+          repaired = true
+        } else if media[index].localUri != nil {
+          media[index].localUri = nil
+          repaired = true
+        }
+      }
+      payloadState.media = media
+      if repaired {
+        state.media = media
+        try? save()
+      }
+    }
     let encoder = JSONEncoder()
-    guard let data = try? encoder.encode(state) else { return "{\"version\":1,\"contacts\":[],\"messages\":[]}" }
+    guard let data = try? encoder.encode(payloadState) else { return "{\"version\":1,\"contacts\":[],\"messages\":[]}" }
     return String(data: data, encoding: .utf8) ?? "{\"version\":1,\"contacts\":[],\"messages\":[]}"
   }
 
@@ -730,8 +781,59 @@ private final class LocalVault {
     state.contacts.reduce(0) { $0 + ($1.unreadCount ?? 0) }
   }
 
+  func upsertMediaEvent(_ payload: [String: Any]) {
+    guard let assetId = payload["assetId"] as? String,
+          let peerDeviceId = payload["peerDeviceId"] as? String,
+          let kind = payload["kind"] as? String,
+          let fileName = payload["fileName"] as? String,
+          let stateName = payload["state"] as? String else { return }
+    var media = state.media ?? []
+    let now = TelemetryCryptoEngine.nowMs()
+    let index = media.firstIndex(where: { $0.assetId == assetId })
+    var record = index.map { media[$0] } ?? LocalMediaRecord(
+      assetId: assetId, peerDeviceId: peerDeviceId, kind: kind, fileName: fileName,
+      byteLength: (payload["byteLength"] as? NSNumber)?.int64Value ?? 0,
+      state: stateName, totalChunks: (payload["totalChunks"] as? NSNumber)?.intValue ?? 1,
+      updatedAt: now
+    )
+    record.peerDeviceId = peerDeviceId
+    record.kind = kind
+    record.fileName = fileName
+    let terminalStates: Set<String> = ["outgoingComplete", "incomingReady"]
+    if !terminalStates.contains(record.state) || terminalStates.contains(stateName) {
+      record.state = stateName
+    }
+    record.byteLength = (payload["byteLength"] as? NSNumber)?.int64Value ?? record.byteLength
+    record.totalChunks = (payload["totalChunks"] as? NSNumber)?.intValue ?? record.totalChunks
+    record.acknowledgedChunks = (payload["acknowledgedChunks"] as? NSNumber)?.intValue ?? record.acknowledgedChunks
+    record.receivedChunks = (payload["receivedChunks"] as? NSNumber)?.intValue ?? record.receivedChunks
+    record.localUri = (payload["localUri"] as? String) ?? record.localUri
+    record.sha256 = (payload["sha256"] as? String) ?? record.sha256
+    record.verified = (payload["verified"] as? Bool) ?? record.verified
+    if record.state == "outgoingComplete" || record.state == "incomingReady" { record.verified = true }
+    record.message = (payload["message"] as? String) ?? record.message
+    record.updatedAt = now
+    if let index { media[index] = record } else { media.append(record) }
+    if media.count > 1000 { media.removeFirst(media.count - 1000) }
+    state.media = media
+    try? save()
+  }
+
   func hasContact(deviceId: String, peerId: String) -> Bool {
     state.contacts.contains(where: { $0.deviceId == deviceId && $0.peerId == peerId })
+  }
+
+  func hasAnyContact() -> Bool {
+    !state.contacts.isEmpty
+  }
+
+  func trustedDeviceId(matchingFingerprint fingerprint: String) -> String? {
+    let clean = fingerprint.lowercased()
+    guard clean.count >= 8 else { return nil }
+    return state.contacts.first(where: { contact in
+      let hex = contact.deviceId.replacingOccurrences(of: "tlm:device:", with: "").lowercased()
+      return hex.hasPrefix(clean)
+    })?.deviceId
   }
 
   func enqueueOutgoing(peerDeviceId: String, text: String) -> String {
@@ -800,6 +902,13 @@ private final class LocalVault {
     let box = try AES.GCM.SealedBox(combined: combined)
     let clear = try AES.GCM.open(box, using: key)
     state = try JSONDecoder().decode(LocalVaultState.self, from: clear)
+    if let media = state.media {
+      let clean = media.filter { $0.fileName != "__telemetry_media_probe.bin" }
+      if clean.count != media.count {
+        state.media = clean
+        try? save()
+      }
+    }
   }
 
   private func save() throws {
@@ -837,6 +946,13 @@ private final class ReplayWindow {
   }
 }
 
+private struct BleMediaAssembly {
+  let fragmentCount: Int
+  var fragments: [Int: Data]
+  var byteCount: Int
+  var updatedAt: Int64
+}
+
 private final class TelemetryIosCore: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate, CBPeripheralManagerDelegate, UNUserNotificationCenterDelegate {
   private var emitter: ((String, [String: Any]) -> Void)?
   private var pendingNotificationOpenDeviceId: String?
@@ -856,8 +972,16 @@ private final class TelemetryIosCore: NSObject, CBCentralManagerDelegate, CBPeri
   private var messageServerCharacteristic: CBMutableCharacteristic?
   private var receiptServerCharacteristic: CBMutableCharacteristic?
   private var subscribedCentrals: [String: CBCentral] = [:]
+  private var bleMediaAssemblies: [String: BleMediaAssembly] = [:]
+  private var bleMediaResponseContinuations: [String: CheckedContinuation<Data, Error>] = [:]
+  private var bleMediaWriteContinuations: [String: CheckedContinuation<Void, Error>] = [:]
+  private var bleMediaActiveWriterPeerIds = Set<String>()
   private var reconnectWorkItems: [String: DispatchWorkItem] = [:]
   private var reconnectAttempts: [String: Int] = [:]
+  private var interactivePeerIds = Set<String>()
+  private var silentProbePeerIds = Set<String>()
+  private var probeCooldownUntil: [String: Int64] = [:]
+  private var availableWifiPeerDeviceIds = Set<String>()
   private var acceptedIncomingCount = 0
   private var duplicateFramesSuppressed = 0
   private var replayRejectedCount = 0
@@ -866,6 +990,8 @@ private final class TelemetryIosCore: NSObject, CBCentralManagerDelegate, CBPeri
   private var notificationPermissionRequested = false
   private var wifiFailureLaunchHookConsumed = false
   private var payloadProbeLaunchStarted = false
+  private var mediaProbeTargetDeviceIds = Set<String>()
+  private var lastNativeProfileSyncAt: [String: Int64] = [:]
   private lazy var wifiTransport: TelemetryWifiTransport = {
     let transport = TelemetryWifiTransport()
     transport.onLog = { [weak self] message in
@@ -883,9 +1009,14 @@ private final class TelemetryIosCore: NSObject, CBCentralManagerDelegate, CBPeri
         ])
       }
       if available {
+        self?.availableWifiPeerDeviceIds.insert(deviceId)
+        self?.probeDiscoveredPeerForTrustedWifiDevice(deviceId)
+        self?.scheduleMediaProbeIfRequested(deviceId: deviceId)
         Task { [weak self] in
           _ = await self?.mediaRuntime.resumePending(peerDeviceId: deviceId)
         }
+      } else {
+        self?.availableWifiPeerDeviceIds.remove(deviceId)
       }
     }
     transport.onFrame = { [weak self] deviceId, frame, completion in
@@ -915,6 +1046,310 @@ private final class TelemetryIosCore: NSObject, CBCentralManagerDelegate, CBPeri
     return transport
   }()
 
+  private lazy var mpcTransport: TelemetryMPCTransport = {
+    let transport = TelemetryMPCTransport()
+    transport.onLog = { [weak self] message in
+      guard let self, self.reliabilityLoggingEnabled else { return }
+      print("[TelemetryMPC] \(message)")
+    }
+    transport.onPeerChange = { [weak self] deviceId, available in
+      guard let self else { return }
+      if self.reliabilityLoggingEnabled {
+        print("[TelemetryMPC] peer=\(deviceId) available=\(available)")
+      }
+      DispatchQueue.main.async {
+        self.emit("onState", [
+          "state": available ? "direct-peer-available" : "direct-peer-unavailable",
+          "detail": deviceId
+        ])
+      }
+      if available {
+        self.scheduleMediaProbeIfRequested(deviceId: deviceId)
+        Task { [weak self] in
+          _ = await self?.mediaRuntime.resumePending(peerDeviceId: deviceId)
+        }
+      }
+    }
+    transport.onFrame = { [weak self] deviceId, frame, completion in
+      guard let self else {
+        completion(.failure(TelemetryNativeError.message("Telemetry core unavailable")))
+        return
+      }
+      if TelemetryMediaRuntime.handles(frame) {
+        do {
+          completion(.success(try self.mediaRuntime.handleIncoming(deviceId: deviceId, frame: frame)))
+        } catch {
+          completion(.failure(error))
+        }
+        return
+      }
+      DispatchQueue.main.async {
+        do {
+          guard let peerId = self.peerIdForDeviceId(deviceId) else {
+            throw TelemetryNativeError.message("Direct peer has no trusted BLE session")
+          }
+          completion(.success(try self.acceptMessage(peerId: peerId, frame: frame)))
+        } catch {
+          completion(.failure(error))
+        }
+      }
+    }
+    return transport
+  }()
+
+  private var forceBleMediaForTest: Bool {
+    ProcessInfo.processInfo.arguments.contains("--telemetry-media-force-ble")
+  }
+
+  private func bleMediaAvailable(deviceId: String) -> Bool {
+    guard let peerId = peerIdForDeviceId(deviceId),
+          let session = sessions[peerId],
+          let remote = session.remoteHello,
+          remote.deviceId == deviceId,
+          trust.isVerified(remote) else { return false }
+    if let peripheral = discovered[peerId],
+       peripheral.state == .connected,
+       characteristics[peerId]?[messageUUID] != nil {
+      return true
+    }
+    return subscribedCentrals[peerId] != nil && messageServerCharacteristic != nil
+  }
+
+  private func mediaPathAvailable(deviceId: String) -> Bool {
+    if forceBleMediaForTest { return bleMediaAvailable(deviceId: deviceId) }
+    return wifiTransport.isAvailable(deviceId: deviceId) ||
+      mpcTransport.isAvailable(deviceId: deviceId) ||
+      bleMediaAvailable(deviceId: deviceId)
+  }
+
+  private func sendMediaFrame(deviceId: String, frame: Data) async throws -> Data {
+    if !forceBleMediaForTest && wifiTransport.isAvailable(deviceId: deviceId) {
+      do {
+        let response = try await wifiTransport.send(deviceId: deviceId, frame: frame)
+        if reliabilityLoggingEnabled { print("[TelemetryMediaPath] selected=wifi peer=\(deviceId) bytes=\(frame.count)") }
+        return response
+      } catch {
+        if reliabilityLoggingEnabled { print("[TelemetryMediaPath] wifi-failed peer=\(deviceId) error=\(error.localizedDescription)") }
+      }
+    }
+    if !forceBleMediaForTest && mpcTransport.isAvailable(deviceId: deviceId) {
+      do {
+        let response = try await mpcTransport.send(deviceId: deviceId, frame: frame)
+        if reliabilityLoggingEnabled { print("[TelemetryMediaPath] selected=mpc peer=\(deviceId) bytes=\(frame.count)") }
+        return response
+      } catch {
+        if reliabilityLoggingEnabled { print("[TelemetryMediaPath] mpc-failed peer=\(deviceId) error=\(error.localizedDescription)") }
+      }
+    }
+    if bleMediaAvailable(deviceId: deviceId) {
+      let response = try await sendBleMediaFrame(deviceId: deviceId, frame: frame)
+      if reliabilityLoggingEnabled { print("[TelemetryMediaPath] selected=ble-fragmented peer=\(deviceId) bytes=\(frame.count)") }
+      return response
+    }
+    throw TelemetryNativeError.message("No direct media path is currently available")
+  }
+
+  private func encodeBleMediaFragment(transactionId: String, isResponse: Bool, index: Int, count: Int, payload: Data) throws -> Data {
+    let idData = Data(transactionId.utf8)
+    guard idData.count == 36, index >= 0, count > 0, index < count, count <= 20_000 else {
+      throw TelemetryNativeError.message("Invalid BLE media fragment metadata")
+    }
+    var packet = Data("TBM1".utf8)
+    packet.append(isResponse ? 1 : 0)
+    packet.append(idData)
+    for value in [UInt32(index), UInt32(count)] {
+      var big = value.bigEndian
+      withUnsafeBytes(of: &big) { packet.append(contentsOf: $0) }
+    }
+    packet.append(payload)
+    return packet
+  }
+
+  private func decodeBleMediaFragment(_ packet: Data) throws -> (String, Bool, Int, Int, Data) {
+    guard packet.count >= bleMediaHeaderBytes,
+          packet.prefix(4) == Data("TBM1".utf8),
+          let transactionId = String(data: packet.subdata(in: 5..<41), encoding: .utf8),
+          transactionId.count == 36 else {
+      throw TelemetryNativeError.message("Malformed BLE media fragment")
+    }
+    func u32(_ offset: Int) -> UInt32 {
+      (UInt32(packet[offset]) << 24) | (UInt32(packet[offset + 1]) << 16) |
+        (UInt32(packet[offset + 2]) << 8) | UInt32(packet[offset + 3])
+    }
+    let index = Int(u32(41))
+    let count = Int(u32(45))
+    guard count > 0, count <= 20_000, index >= 0, index < count else {
+      throw TelemetryNativeError.message("Invalid BLE media fragment range")
+    }
+    return (transactionId, packet[4] == 1, index, count, packet.subdata(in: bleMediaHeaderBytes..<packet.count))
+  }
+
+  private func isBleMediaPacket(_ data: Data) -> Bool {
+    data.count >= 4 && data.prefix(4) == Data("TBM1".utf8)
+  }
+
+  @MainActor
+  private func writeBleMediaPacket(
+    peerId: String,
+    peripheral: CBPeripheral,
+    characteristic: CBCharacteristic,
+    packet: Data
+  ) async throws {
+    guard bleMediaWriteContinuations[peerId] == nil else {
+      throw TelemetryNativeError.message("BLE media write already in flight")
+    }
+    try await withCheckedThrowingContinuation { continuation in
+      bleMediaWriteContinuations[peerId] = continuation
+      peripheral.writeValue(packet, for: characteristic, type: .withResponse)
+      DispatchQueue.main.asyncAfter(deadline: .now() + 8) { [weak self] in
+        guard let self, let pending = self.bleMediaWriteContinuations.removeValue(forKey: peerId) else { return }
+        pending.resume(throwing: TelemetryNativeError.message("BLE media fragment write timed out"))
+      }
+    }
+  }
+
+  @MainActor
+  private func transmitBleMediaPayload(peerId: String, transactionId: String, isResponse: Bool, payload: Data) async throws {
+    guard payload.count <= bleMediaMaxFrameBytes else {
+      throw TelemetryNativeError.message("BLE media frame exceeds fallback limit")
+    }
+
+    var waitSpins = 0
+    while bleMediaActiveWriterPeerIds.contains(peerId) || sessions[peerId]?.lastOutboundMessageId != nil {
+      try await Task.sleep(nanoseconds: 5_000_000)
+      waitSpins += 1
+      if waitSpins > 4_000 { throw TelemetryNativeError.message("BLE media writer wait timed out") }
+    }
+    bleMediaActiveWriterPeerIds.insert(peerId)
+    defer { bleMediaActiveWriterPeerIds.remove(peerId) }
+
+    let centralPeripheral = discovered[peerId]
+    let centralCharacteristic = characteristics[peerId]?[messageUUID]
+    let peripheralCentral = subscribedCentrals[peerId]
+    let manager = peripheralManager
+    let serverCharacteristic = messageServerCharacteristic
+
+    let packetLimit: Int
+    let useCentralWrite: Bool
+    if let peripheral = centralPeripheral, peripheral.state == .connected, centralCharacteristic != nil {
+      packetLimit = peripheral.maximumWriteValueLength(for: .withResponse)
+      useCentralWrite = true
+    } else if let central = peripheralCentral, manager != nil, serverCharacteristic != nil {
+      packetLimit = central.maximumUpdateValueLength
+      useCentralWrite = false
+    } else {
+      throw TelemetryNativeError.message("BLE media fallback has no active peer route")
+    }
+    guard packetLimit > bleMediaHeaderBytes else {
+      throw TelemetryNativeError.message("BLE MTU is too small for media fallback")
+    }
+    let fragmentBytes = packetLimit - bleMediaHeaderBytes
+    let count = max(1, Int(ceil(Double(payload.count) / Double(fragmentBytes))))
+    guard count <= 20_000 else { throw TelemetryNativeError.message("BLE media frame requires too many fragments") }
+
+    for index in 0..<count {
+      let lower = index * fragmentBytes
+      let upper = min(payload.count, lower + fragmentBytes)
+      let body = payload.subdata(in: lower..<upper)
+      let packet = try encodeBleMediaFragment(transactionId: transactionId, isResponse: isResponse, index: index, count: count, payload: body)
+      if useCentralWrite {
+        guard let peripheral = centralPeripheral, let characteristic = centralCharacteristic else {
+          throw TelemetryNativeError.message("BLE media central route disappeared")
+        }
+        try await writeBleMediaPacket(peerId: peerId, peripheral: peripheral, characteristic: characteristic, packet: packet)
+      } else {
+        guard let central = peripheralCentral, let manager, let characteristic = serverCharacteristic else {
+          throw TelemetryNativeError.message("BLE media peripheral route disappeared")
+        }
+        var spins = 0
+        while !manager.updateValue(packet, for: characteristic, onSubscribedCentrals: [central]) {
+          try await Task.sleep(nanoseconds: 5_000_000)
+          spins += 1
+          if spins > 4_000 { throw TelemetryNativeError.message("BLE media notify queue timed out") }
+        }
+      }
+      if index % 64 == 63 { await Task.yield() }
+    }
+    if reliabilityLoggingEnabled {
+      print("[TelemetryBLEMedia] tx=\(transactionId) response=\(isResponse) fragments=\(count) bytes=\(payload.count)")
+    }
+  }
+
+  @MainActor
+  private func sendBleMediaFrame(deviceId: String, frame: Data) async throws -> Data {
+    guard let peerId = peerIdForDeviceId(deviceId), bleMediaAvailable(deviceId: deviceId) else {
+      throw TelemetryNativeError.message("BLE media peer is unavailable")
+    }
+    let transactionId = UUID().uuidString.lowercased()
+    return try await withCheckedThrowingContinuation { continuation in
+      bleMediaResponseContinuations[transactionId] = continuation
+      Task { @MainActor [weak self] in
+        guard let self else { return }
+        do {
+          try await self.transmitBleMediaPayload(peerId: peerId, transactionId: transactionId, isResponse: false, payload: frame)
+        } catch {
+          if let pending = self.bleMediaResponseContinuations.removeValue(forKey: transactionId) {
+            pending.resume(throwing: error)
+          }
+        }
+      }
+      DispatchQueue.main.asyncAfter(deadline: .now() + 75) { [weak self] in
+        guard let self, let pending = self.bleMediaResponseContinuations.removeValue(forKey: transactionId) else { return }
+        pending.resume(throwing: TelemetryNativeError.message("BLE media response timed out"))
+      }
+    }
+  }
+
+  private func handleBleMediaFragment(peerId: String, packet: Data) throws {
+    let (transactionId, isResponse, index, count, body) = try decodeBleMediaFragment(packet)
+    let now = TelemetryCryptoEngine.nowMs()
+    bleMediaAssemblies = bleMediaAssemblies.filter { now - $0.value.updatedAt <= bleMediaAssemblyTtlMs }
+    let key = "\(peerId)|\(transactionId)|\(isResponse ? 1 : 0)"
+    var assembly = bleMediaAssemblies[key] ?? BleMediaAssembly(fragmentCount: count, fragments: [:], byteCount: 0, updatedAt: now)
+    guard assembly.fragmentCount == count else { throw TelemetryNativeError.message("BLE media fragment count changed mid-frame") }
+    if let existing = assembly.fragments[index] {
+      guard existing == body else { throw TelemetryNativeError.message("BLE media duplicate fragment conflict") }
+    } else {
+      assembly.fragments[index] = body
+      assembly.byteCount += body.count
+    }
+    guard assembly.byteCount <= bleMediaMaxFrameBytes else {
+      bleMediaAssemblies.removeValue(forKey: key)
+      throw TelemetryNativeError.message("BLE media reassembly exceeds fallback limit")
+    }
+    assembly.updatedAt = now
+    bleMediaAssemblies[key] = assembly
+    guard assembly.fragments.count == count else { return }
+    var full = Data(capacity: assembly.byteCount)
+    for partIndex in 0..<count {
+      guard let part = assembly.fragments[partIndex] else { return }
+      full.append(part)
+    }
+    bleMediaAssemblies.removeValue(forKey: key)
+
+    if isResponse {
+      if let pending = bleMediaResponseContinuations.removeValue(forKey: transactionId) {
+        pending.resume(returning: full)
+      }
+      if reliabilityLoggingEnabled { print("[TelemetryBLEMedia] rx-response tx=\(transactionId) bytes=\(full.count)") }
+      return
+    }
+
+    guard let session = sessions[peerId], let remote = session.remoteHello, trust.isVerified(remote) else {
+      throw TelemetryNativeError.message("BLE media request came from an untrusted session")
+    }
+    let response = try mediaRuntime.handleIncoming(deviceId: remote.deviceId, frame: full)
+    if reliabilityLoggingEnabled { print("[TelemetryBLEMedia] rx-request tx=\(transactionId) bytes=\(full.count)") }
+    Task { @MainActor [weak self] in
+      guard let self else { return }
+      do {
+        try await self.transmitBleMediaPayload(peerId: peerId, transactionId: transactionId, isResponse: true, payload: response)
+      } catch {
+        self.emit("onError", ["message": "BLE media response failed: \(error.localizedDescription)"])
+      }
+    }
+  }
+
   private lazy var mediaRuntime: TelemetryMediaRuntime = {
     do {
       return try TelemetryMediaRuntime(
@@ -928,21 +1363,35 @@ private final class TelemetryIosCore: NSObject, CBCentralManagerDelegate, CBPeri
           self?.mediaPeerContext(deviceId: deviceId)
         },
         wifiAvailable: { [weak self] deviceId in
-          self?.wifiTransport.isAvailable(deviceId: deviceId) == true
+          self?.mediaPathAvailable(deviceId: deviceId) == true
         },
         sendFrame: { [weak self] deviceId, frame in
           guard let self else { throw TelemetryNativeError.message("Telemetry core unavailable") }
-          return try await self.wifiTransport.send(deviceId: deviceId, frame: frame)
+          return try await self.sendMediaFrame(deviceId: deviceId, frame: frame)
         },
         emit: { [weak self] name, payload in
           DispatchQueue.main.async {
             guard let self else { return }
+            if name == "onMedia",
+               let mediaFile = payload["fileName"] as? String,
+               mediaFile != "__telemetry_profile_avatar.jpg",
+               mediaFile != "__telemetry_media_probe.bin" {
+              self.vault.upsertMediaEvent(payload)
+            }
+            if name == "onMedia", self.reliabilityLoggingEnabled {
+              let state = payload["state"] as? String ?? "?"
+              let file = payload["fileName"] as? String ?? "?"
+              let peer = payload["peerDeviceId"] as? String ?? "?"
+              let verified = payload["verified"] as? Bool ?? false
+              print("[TelemetryMedia] state=\(state) file=\(file) peer=\(peer) verified=\(verified)")
+            }
             if name == "onMedia",
                payload["state"] as? String == "incomingReady",
                payload["fileName"] as? String == "__telemetry_profile_avatar.jpg",
                let deviceId = payload["peerDeviceId"] as? String,
                let localUri = payload["localUri"] as? String,
                self.vault.setContactProfilePhoto(deviceId: deviceId, photoUri: localUri) {
+              if self.reliabilityLoggingEnabled { print("[TelemetryProfile] avatarPersisted device=\(deviceId)") }
               self.emit("onProfile", ["deviceId": deviceId, "photoUri": localUri])
             }
             self.emit(name, payload)
@@ -953,6 +1402,40 @@ private final class TelemetryIosCore: NSObject, CBCentralManagerDelegate, CBPeri
       fatalError("Telemetry media initialization failed: \(error)")
     }
   }()
+
+  private func scheduleMediaProbeIfRequested(deviceId: String) {
+    guard reliabilityLoggingEnabled,
+          !mediaProbeTargetDeviceIds.contains(deviceId),
+          let argument = ProcessInfo.processInfo.arguments.first(where: { $0.hasPrefix("--telemetry-media-probe=") }),
+          let requested = Int(argument.replacingOccurrences(of: "--telemetry-media-probe=", with: "")) else { return }
+    let size = min(max(requested, 1024), 1024 * 1024)
+    guard trust.trustedKeyMaterial(deviceId: deviceId) != nil else { return }
+    mediaProbeTargetDeviceIds.insert(deviceId)
+    Task { [weak self] in
+      guard let self else { return }
+      do {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("telemetry-media-probe-\(UUID().uuidString).bin")
+        var data = Data(count: size)
+        data.withUnsafeMutableBytes { raw in
+          guard let base = raw.bindMemory(to: UInt8.self).baseAddress else { return }
+          for index in 0..<size { base[index] = UInt8(index & 0xff) }
+        }
+        try data.write(to: url, options: .atomic)
+        print("[TelemetryMediaProbe] start peer=\(deviceId) bytes=\(size)")
+        let assetId = try await self.mediaRuntime.sendMedia(
+          peerDeviceId: deviceId,
+          fileURL: url,
+          kind: "file",
+          mimeType: "application/octet-stream",
+          fileName: "__telemetry_media_probe.bin"
+        )
+        print("[TelemetryMediaProbe] queued peer=\(deviceId) asset=\(assetId)")
+        try? FileManager.default.removeItem(at: url)
+      } catch {
+        print("[TelemetryMediaProbe] FAIL peer=\(deviceId) error=\(error.localizedDescription)")
+      }
+    }
+  }
 
   private func mediaPeerContext(deviceId: String) -> TelemetryMediaPeerContext? {
     guard let material = trust.trustedKeyMaterial(deviceId: deviceId) else { return nil }
@@ -1086,7 +1569,9 @@ private final class TelemetryIosCore: NSObject, CBCentralManagerDelegate, CBPeri
         delegate: self,
         queue: .main,
         options: [
-          CBCentralManagerOptionRestoreIdentifierKey: "com.telemetry.ios.preview.central",
+          // Keep trusted identity/message state in our vault, not in a restored CoreBluetooth
+          // connection. Restored central links can remain stuck in connecting/disconnecting
+          // after app replacement and prevent secure-session recovery.
           CBCentralManagerOptionShowPowerAlertKey: true
         ]
       )
@@ -1102,6 +1587,8 @@ private final class TelemetryIosCore: NSObject, CBCentralManagerDelegate, CBPeri
       )
     }
     _ = mediaRuntime
+    _ = mpcTransport
+    mpcTransport.start(localDeviceId: crypto.deviceId)
     do {
       try wifiTransport.start(localDeviceId: crypto.deviceId)
       if ProcessInfo.processInfo.arguments.contains("--telemetry-wifi-fail-next-send"), !wifiFailureLaunchHookConsumed {
@@ -1152,6 +1639,7 @@ private final class TelemetryIosCore: NSObject, CBCentralManagerDelegate, CBPeri
   func stop() {
     desiredRunning = false
     wifiTransport.stop()
+    mpcTransport.stop()
     centralManager?.stopScan()
     for peripheral in discovered.values where peripheral.state == .connected || peripheral.state == .connecting {
       centralManager?.cancelPeripheralConnection(peripheral)
@@ -1165,13 +1653,92 @@ private final class TelemetryIosCore: NSObject, CBCentralManagerDelegate, CBPeri
     messageServerCharacteristic = nil
     receiptServerCharacteristic = nil
     subscribedCentrals.removeAll()
+    bleMediaAssemblies.removeAll()
+    let pendingBleMedia = bleMediaResponseContinuations.values
+    bleMediaResponseContinuations.removeAll()
+    for continuation in pendingBleMedia {
+      continuation.resume(throwing: TelemetryNativeError.message("BLE media transport stopped"))
+    }
+    let pendingBleWrites = bleMediaWriteContinuations.values
+    bleMediaWriteContinuations.removeAll()
+    bleMediaActiveWriterPeerIds.removeAll()
+    for continuation in pendingBleWrites {
+      continuation.resume(throwing: TelemetryNativeError.message("BLE media transport stopped"))
+    }
     for item in reconnectWorkItems.values { item.cancel() }
     reconnectWorkItems.removeAll()
     reconnectAttempts.removeAll()
+    interactivePeerIds.removeAll()
+    silentProbePeerIds.removeAll()
+    probeCooldownUntil.removeAll()
+    availableWifiPeerDeviceIds.removeAll()
+    mediaProbeTargetDeviceIds.removeAll()
+    lastNativeProfileSyncAt.removeAll()
     emit("onState", ["state": "stopped"])
   }
 
+  private func probeDiscoveredPeerForTrustedWifiDevice(_ remoteDeviceId: String) {
+    guard desiredRunning,
+          trust.trustedKeyMaterial(deviceId: remoteDeviceId) != nil,
+          shouldInitiateTrustedConnection(remoteDeviceId: remoteDeviceId) else { return }
+
+    let now = TelemetryCryptoEngine.nowMs()
+    for peerId in discovered.keys.sorted() {
+      if let remote = sessions[peerId]?.remoteHello {
+        if remote.deviceId == remoteDeviceId, trust.isVerified(remote) {
+          vault.upsertContact(deviceId: remote.deviceId, peerId: peerId)
+          emitTrustedIfReady(peerId: peerId)
+          return
+        }
+        continue
+      }
+      if interactivePeerIds.contains(peerId) || silentProbePeerIds.contains(peerId) { continue }
+      if now < (probeCooldownUntil[peerId] ?? 0) { continue }
+      silentProbePeerIds.insert(peerId)
+      do {
+        try connectInternal(peerId: peerId, emitConnecting: false)
+        logReliability("wifiIdentityProbe target=\(remoteDeviceId) peer=\(peerId)")
+      } catch {
+        silentProbePeerIds.remove(peerId)
+        probeCooldownUntil[peerId] = now + 4_000
+      }
+      return
+    }
+  }
+
+  private func advertisementLocalName() -> String {
+    let hex = crypto.deviceId.replacingOccurrences(of: "tlm:device:", with: "").lowercased()
+    return "TLM-" + String(hex.prefix(12))
+  }
+
+  private func advertisedFingerprint(_ name: String?) -> String? {
+    guard let name, name.hasPrefix("TLM-") else { return nil }
+    let value = String(name.dropFirst(4)).lowercased()
+    return value.count >= 8 ? value : nil
+  }
+
+  private func shouldInitiateTrustedConnection(remoteDeviceId: String) -> Bool {
+    crypto.deviceId < remoteDeviceId
+  }
+
   func connect(peerId: String) throws {
+    interactivePeerIds.insert(peerId)
+    silentProbePeerIds.remove(peerId)
+    try connectInternal(peerId: peerId, emitConnecting: true)
+  }
+
+  func probePeer(peerId: String) throws {
+    if let session = sessions[peerId], let remote = session.remoteHello, trust.isVerified(remote) {
+      vault.upsertContact(deviceId: remote.deviceId, peerId: peerId)
+      emitTrustedIfReady(peerId: peerId)
+      return
+    }
+    guard !interactivePeerIds.contains(peerId) else { return }
+    silentProbePeerIds.insert(peerId)
+    try connectInternal(peerId: peerId, emitConnecting: false)
+  }
+
+  private func connectInternal(peerId: String, emitConnecting: Bool) throws {
     guard desiredRunning else { throw TelemetryNativeError.message("Start Offline first") }
     guard let peripheral = discovered[peerId] else {
       restartCentralScan()
@@ -1180,12 +1747,34 @@ private final class TelemetryIosCore: NSObject, CBCentralManagerDelegate, CBPeri
     _ = try ensureSession(peerId)
     reconnectWorkItems[peerId]?.cancel()
     reconnectWorkItems.removeValue(forKey: peerId)
-    emit("onState", ["state": "connecting", "detail": peerId])
-    if peripheral.state == .connected {
+    if emitConnecting { emit("onState", ["state": "connecting", "detail": peerId]) }
+    logReliability("connectInternal peer=\(peerId) state=\(peripheral.state.rawValue)")
+    switch peripheral.state {
+    case .connected:
       peripheral.delegate = self
       peripheral.discoverServices([serviceUUID])
-    } else if peripheral.state == .disconnected {
+    case .disconnected:
       centralManager?.connect(peripheral, options: nil)
+    case .connecting, .disconnecting:
+      // A restored CoreBluetooth link can remain stuck across app replacement/relaunch.
+      // Cancel only the transient transport, then reconnect with the same trusted identity.
+      centralManager?.cancelPeripheralConnection(peripheral)
+      DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) { [weak self, weak peripheral] in
+        guard let self, let peripheral, self.desiredRunning else { return }
+        let currentPeerId = peripheral.identifier.uuidString
+        self.logReliability("staleLinkRetry peer=\(currentPeerId) state=\(peripheral.state.rawValue)")
+        if peripheral.state == .disconnected {
+          _ = try? self.ensureSession(currentPeerId)
+          self.centralManager?.connect(peripheral, options: nil)
+        } else if peripheral.state == .connected {
+          peripheral.delegate = self
+          peripheral.discoverServices([serviceUUID])
+        } else {
+          self.scheduleReconnect(peerId: currentPeerId)
+        }
+      }
+    @unknown default:
+      scheduleReconnect(peerId: peerId)
     }
   }
 
@@ -1193,13 +1782,9 @@ private final class TelemetryIosCore: NSObject, CBCentralManagerDelegate, CBPeri
     guard desiredRunning else { return }
     logReliability("recoverTransport peer=\(peerId)")
     restartCentralScan()
-    guard centralManager?.state == .poweredOn else { return }
-    guard discovered[peerId] != nil else {
-      emit("onState", ["state": "recovering", "detail": peerId])
-      return
-    }
-    reconnectAttempts[peerId] = 0
-    scheduleReconnect(peerId: peerId, immediate: true)
+    // Recovery is driven by signed identity discovery. Do not directly reconnect here:
+    // both phones doing so at once can create a symmetric CoreBluetooth connect collision.
+    emit("onState", ["state": "recovering", "detail": peerId])
   }
 
   func trustPeer(deviceId: String) -> Bool {
@@ -1236,7 +1821,56 @@ private final class TelemetryIosCore: NSObject, CBCentralManagerDelegate, CBPeri
           isTransportReady(peerId: peerId) else { return }
     logReliability("trustedReady peer=\(peerId)")
     emit("onTrusted", ["peerId": peerId, "deviceId": remote.deviceId])
+    scheduleNativeProfileSync(peerId: peerId, deviceId: remote.deviceId)
     schedulePayloadProbesIfRequested(peerId: peerId)
+    if reliabilityLoggingEnabled {
+      print("[TelemetryBLEMedia] trusted-check peer=\(peerId) available=\(bleMediaAvailable(deviceId: remote.deviceId)) sharedMessageChannel=true")
+    }
+    scheduleMediaProbeIfRequested(deviceId: remote.deviceId)
+    Task { [weak self] in
+      let resumed = await self?.mediaRuntime.resumePending(peerDeviceId: remote.deviceId) ?? 0
+      if self?.reliabilityLoggingEnabled == true { print("[TelemetryBLEMedia] trusted-resume peer=\(peerId) count=\(resumed)") }
+    }
+  }
+
+  private func scheduleNativeProfileSync(peerId: String, deviceId: String) {
+    let now = TelemetryCryptoEngine.nowMs()
+    if now - (lastNativeProfileSyncAt[deviceId] ?? 0) < 5_000 { return }
+    lastNativeProfileSyncAt[deviceId] = now
+    let profile = vault.profile()
+    if reliabilityLoggingEnabled {
+      print("[TelemetryProfile] local device=\(crypto.deviceId) name=\(profile.displayName) template=\(profile.templateId ?? "") customPhoto=\(profile.photoUri != nil)")
+    }
+    Task { @MainActor [weak self] in
+      guard let self else { return }
+      // Give restored message queues first use of the fresh secure session.
+      try? await Task.sleep(nanoseconds: 1_200_000_000)
+      do {
+        _ = try await self.sendProfile(
+          peerId: peerId,
+          peerDeviceId: deviceId,
+          displayName: profile.displayName,
+          templateId: profile.templateId
+        )
+        if self.reliabilityLoggingEnabled { print("[TelemetryProfile] metadataSent device=\(deviceId)") }
+      } catch {
+        if self.reliabilityLoggingEnabled { print("[TelemetryProfile] metadataSendDeferred device=\(deviceId) error=\(error.localizedDescription)") }
+      }
+      if let photoUri = profile.photoUri, let fileURL = URL(string: photoUri), fileURL.isFileURL {
+        do {
+          _ = try await self.mediaRuntime.sendMedia(
+            peerDeviceId: deviceId,
+            fileURL: fileURL,
+            kind: "photo",
+            mimeType: "image/jpeg",
+            fileName: "__telemetry_profile_avatar.jpg"
+          )
+          if self.reliabilityLoggingEnabled { print("[TelemetryProfile] avatarSent device=\(deviceId)") }
+        } catch {
+          if self.reliabilityLoggingEnabled { print("[TelemetryProfile] avatarSendDeferred device=\(deviceId) error=\(error.localizedDescription)") }
+        }
+      }
+    }
   }
 
   private func schedulePayloadProbesIfRequested(peerId: String) {
@@ -1298,7 +1932,6 @@ private final class TelemetryIosCore: NSObject, CBCentralManagerDelegate, CBPeri
     session.lastOutboundFrame = frame
 
     if wifiTransport.isAvailable(deviceId: remote.deviceId) {
-      session.lastOutboundMessageId = messageId
       let receipt = try await wifiTransport.send(deviceId: remote.deviceId, frame: frame)
       DispatchQueue.main.async { [weak self] in
         guard let self else { return }
@@ -1351,6 +1984,9 @@ private final class TelemetryIosCore: NSObject, CBCentralManagerDelegate, CBPeri
   }
 
   private func sendFrameOverBle(peerId: String, session: PeerSession, frame: Data, messageId: String) throws {
+    guard !bleMediaActiveWriterPeerIds.contains(peerId) else {
+      throw TelemetryNativeError.message("BLE media transfer is using this peer link; retry text shortly")
+    }
     session.lastOutboundMessageId = messageId
     if let peripheral = discovered[peerId],
        peripheral.state == .connected,
@@ -1532,6 +2168,9 @@ private final class TelemetryIosCore: NSObject, CBCentralManagerDelegate, CBPeri
     guard let url = URL(string: uri), url.isFileURL else {
       throw TelemetryNativeError.message("Media URI must be a local file URL")
     }
+    if !mediaPathAvailable(deviceId: peerDeviceId) {
+      wifiTransport.refreshDiscovery()
+    }
     return try await mediaRuntime.sendMedia(
       peerDeviceId: peerDeviceId,
       fileURL: url,
@@ -1542,7 +2181,11 @@ private final class TelemetryIosCore: NSObject, CBCentralManagerDelegate, CBPeri
   }
 
   func resumeMedia(peerDeviceId: String?) async -> Int {
-    await mediaRuntime.resumePending(peerDeviceId: peerDeviceId)
+    if let peerDeviceId, !mediaPathAvailable(deviceId: peerDeviceId) {
+      wifiTransport.refreshDiscovery()
+      try? await Task.sleep(nanoseconds: 650_000_000)
+    }
+    return await mediaRuntime.resumePending(peerDeviceId: peerDeviceId)
   }
 
   func sendText(peerId: String, text: String) throws -> String {
@@ -1646,7 +2289,7 @@ private final class TelemetryIosCore: NSObject, CBCentralManagerDelegate, CBPeri
     } else if !manager.isAdvertising {
       manager.startAdvertising([
         CBAdvertisementDataServiceUUIDsKey: [serviceUUID],
-        CBAdvertisementDataLocalNameKey: "Telemetry"
+        CBAdvertisementDataLocalNameKey: advertisementLocalName()
       ])
     }
   }
@@ -1678,14 +2321,26 @@ private final class TelemetryIosCore: NSObject, CBCentralManagerDelegate, CBPeri
 
     let code = TelemetryCryptoEngine.safetyCode(session.localHello, remote)
     if trust.isVerified(remote) {
+      interactivePeerIds.remove(peerId)
+      silentProbePeerIds.remove(peerId)
+      probeCooldownUntil.removeValue(forKey: peerId)
       vault.upsertContact(deviceId: remote.deviceId, peerId: peerId)
+      logReliability("identityRebound peer=\(peerId) device=\(remote.deviceId)")
       emitTrustedIfReady(peerId: peerId)
-    } else {
+    } else if interactivePeerIds.contains(peerId) {
+      silentProbePeerIds.remove(peerId)
       emit("onVerification", [
         "peerId": peerId,
         "deviceId": remote.deviceId,
         "safetyCode": code
       ])
+    } else {
+      silentProbePeerIds.remove(peerId)
+      probeCooldownUntil[peerId] = TelemetryCryptoEngine.nowMs() + 15_000
+      logReliability("silentProbeIgnoredUntrusted peer=\(peerId) device=\(remote.deviceId)")
+      if let peripheral = discovered[peerId], peripheral.state == .connected {
+        centralManager?.cancelPeripheralConnection(peripheral)
+      }
     }
   }
 
@@ -1729,6 +2384,9 @@ private final class TelemetryIosCore: NSObject, CBCentralManagerDelegate, CBPeri
           displayName: payload["n"],
           templateId: payload["t"]
         )
+        if reliabilityLoggingEnabled {
+          print("[TelemetryProfile] metadataAccepted device=\(remote.deviceId) name=\(payload["n"] ?? "") template=\(payload["t"] ?? "")")
+        }
         emit("onProfile", [
           "peerId": peerId,
           "deviceId": remote.deviceId,
@@ -1888,6 +2546,34 @@ private final class TelemetryIosCore: NSObject, CBCentralManagerDelegate, CBPeri
       "name": advertisedName ?? peripheral.name ?? "Telemetry device",
       "rssi": RSSI.intValue
     ])
+
+    for deviceId in availableWifiPeerDeviceIds.sorted() {
+      probeDiscoveredPeerForTrustedWifiDevice(deviceId)
+    }
+
+    // CoreBluetooth peer UUIDs are transient. The advertisement exposes only a short
+    // stable fingerprint so we can choose one BLE initiator before the signed hello.
+    // Full trust still comes exclusively from the verified signed hello below.
+    let now = TelemetryCryptoEngine.nowMs()
+    if let fingerprint = advertisedFingerprint(advertisedName),
+       let remoteDeviceId = vault.trustedDeviceId(matchingFingerprint: fingerprint) {
+      let initiate = shouldInitiateTrustedConnection(remoteDeviceId: remoteDeviceId)
+      logReliability("trustedAdvertisement peer=\(peerId) device=\(remoteDeviceId) initiate=\(initiate)")
+      if initiate,
+         sessions[peerId]?.remoteHello == nil,
+         !interactivePeerIds.contains(peerId),
+         !silentProbePeerIds.contains(peerId),
+         now >= (probeCooldownUntil[peerId] ?? 0) {
+        silentProbePeerIds.insert(peerId)
+        do {
+          try connectInternal(peerId: peerId, emitConnecting: false)
+          logReliability("nativeIdentityProbe peer=\(peerId)")
+        } catch {
+          silentProbePeerIds.remove(peerId)
+          probeCooldownUntil[peerId] = now + 4_000
+        }
+      }
+    }
   }
 
   func centralManager(_ central: CBCentralManager, didConnect peripheral: CBPeripheral) {
@@ -1905,6 +2591,7 @@ private final class TelemetryIosCore: NSObject, CBCentralManagerDelegate, CBPeri
     let peerId = peripheral.identifier.uuidString
     characteristics.removeValue(forKey: peerId)
     sessions.removeValue(forKey: peerId)
+    silentProbePeerIds.remove(peerId)
     emit("onState", ["state": "waiting-peer", "detail": peerId])
     scheduleReconnect(peerId: peerId)
   }
@@ -1913,6 +2600,7 @@ private final class TelemetryIosCore: NSObject, CBCentralManagerDelegate, CBPeri
     let peerId = peripheral.identifier.uuidString
     characteristics.removeValue(forKey: peerId)
     sessions.removeValue(forKey: peerId)
+    silentProbePeerIds.remove(peerId)
     emit("onState", ["state": "disconnected", "detail": peerId])
 
     guard desiredRunning else { return }
@@ -1965,8 +2653,13 @@ private final class TelemetryIosCore: NSObject, CBCentralManagerDelegate, CBPeri
   }
 
   func peripheral(_ peripheral: CBPeripheral, didWriteValueFor characteristic: CBCharacteristic, error: Error?) {
+    let peerId = peripheral.identifier.uuidString
+    if characteristic.uuid == messageUUID, let pending = bleMediaWriteContinuations.removeValue(forKey: peerId) {
+      if let error { pending.resume(throwing: error) }
+      else { pending.resume(returning: ()) }
+      return
+    }
     if let error {
-      let peerId = peripheral.identifier.uuidString
       if characteristic.uuid == helloUUID || characteristic.uuid == messageUUID || characteristic.uuid == receiptUUID {
         characteristics.removeValue(forKey: peerId)
         sessions.removeValue(forKey: peerId)
@@ -2008,14 +2701,18 @@ private final class TelemetryIosCore: NSObject, CBCentralManagerDelegate, CBPeri
         try acceptHello(peerId: peripheral.identifier.uuidString, frame: data)
       } else if characteristic.uuid == messageUUID {
         let peerId = peripheral.identifier.uuidString
-        let receipt = try acceptMessage(peerId: peerId, frame: data)
-        guard let receiptCharacteristic = characteristics[peerId]?[receiptUUID] else {
-          throw TelemetryNativeError.message("Telemetry receipt characteristic is unavailable")
+        if isBleMediaPacket(data) {
+          try handleBleMediaFragment(peerId: peerId, packet: data)
+        } else {
+          let receipt = try acceptMessage(peerId: peerId, frame: data)
+          guard let receiptCharacteristic = characteristics[peerId]?[receiptUUID] else {
+            throw TelemetryNativeError.message("Telemetry receipt characteristic is unavailable")
+          }
+          guard receipt.count <= peripheral.maximumWriteValueLength(for: .withResponse) else {
+            throw TelemetryNativeError.message("Signed receipt exceeds current BLE write size")
+          }
+          peripheral.writeValue(receipt, for: receiptCharacteristic, type: .withResponse)
         }
-        guard receipt.count <= peripheral.maximumWriteValueLength(for: .withResponse) else {
-          throw TelemetryNativeError.message("Signed receipt exceeds current BLE write size")
-        }
-        peripheral.writeValue(receipt, for: receiptCharacteristic, type: .withResponse)
       } else if characteristic.uuid == receiptUUID {
         try acceptReceipt(peerId: peripheral.identifier.uuidString, frame: data)
       }
@@ -2045,7 +2742,7 @@ private final class TelemetryIosCore: NSObject, CBCentralManagerDelegate, CBPeri
     guard desiredRunning, !peripheral.isAdvertising else { return }
     peripheral.startAdvertising([
       CBAdvertisementDataServiceUUIDsKey: [serviceUUID],
-      CBAdvertisementDataLocalNameKey: "Telemetry"
+      CBAdvertisementDataLocalNameKey: advertisementLocalName()
     ])
   }
 
@@ -2111,7 +2808,11 @@ private final class TelemetryIosCore: NSObject, CBCentralManagerDelegate, CBPeri
         if request.characteristic.uuid == helloUUID {
           try acceptHello(peerId: peerId, frame: value)
         } else if request.characteristic.uuid == messageUUID {
-          receipts[peerId] = try acceptMessage(peerId: peerId, frame: value)
+          if isBleMediaPacket(value) {
+            try handleBleMediaFragment(peerId: peerId, packet: value)
+          } else {
+            receipts[peerId] = try acceptMessage(peerId: peerId, frame: value)
+          }
         } else if request.characteristic.uuid == receiptUUID {
           try acceptReceipt(peerId: peerId, frame: value)
         } else {
@@ -2219,6 +2920,10 @@ public class TelemetryIosNativeModule: Module {
 
     AsyncFunction("connect") { (peerId: String) in
       try self.core.connect(peerId: peerId)
+    }.runOnQueue(.main)
+
+    AsyncFunction("probePeer") { (peerId: String) in
+      try self.core.probePeer(peerId: peerId)
     }.runOnQueue(.main)
 
     AsyncFunction("recoverTransport") { (peerId: String) in
