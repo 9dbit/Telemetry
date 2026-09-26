@@ -210,6 +210,91 @@ final class TelemetryMediaRuntime {
     return resumed
   }
 
+  func recoverDurableOutgoingPreviews() -> [[String: Any]] {
+    var events: [[String: Any]] = []
+    for record in loadAllOutgoingStates() {
+      guard record.kind == "photo" || record.kind == "video" else { continue }
+      let previewURL = outgoingAssetDir(record.assetId)
+        .appendingPathComponent("preview-\(Self.safeFileName(record.fileName))")
+      if !FileManager.default.fileExists(atPath: previewURL.path) {
+        guard let context = contextForDeviceId(record.peerDeviceId) else { continue }
+        do {
+          try reconstructOutgoingPreview(record: record, context: context, targetURL: previewURL)
+        } catch {
+          continue
+        }
+      }
+      guard FileManager.default.fileExists(atPath: previewURL.path) else { continue }
+      let complete = record.chunkCount > 0 && record.acked.count >= record.chunkCount
+      events.append([
+        "state": complete ? "outgoingComplete" : "outgoingProgress",
+        "assetId": record.assetId,
+        "kind": record.kind,
+        "fileName": record.fileName,
+        "byteLength": record.byteLength,
+        "acknowledgedChunks": record.acked.count,
+        "totalChunks": record.chunkCount,
+        "peerDeviceId": record.peerDeviceId,
+        "localUri": previewURL.absoluteString,
+        "verified": complete
+      ])
+    }
+    return events
+  }
+
+  private func reconstructOutgoingPreview(
+    record: TelemetryMediaOutgoingState,
+    context: TelemetryMediaPeerContext,
+    targetURL: URL
+  ) throws {
+    let assetDir = outgoingAssetDir(record.assetId)
+    let manifestWire = try Data(contentsOf: assetDir.appendingPathComponent("manifest.tce1"))
+    let envelope = try Self.decodeControlWire(manifestWire)
+    guard envelope.senderId == localDeviceId,
+          envelope.recipientId == record.peerDeviceId,
+          envelope.contentType == Self.manifestContentType else {
+      throw TelemetryMediaError.message("Outgoing media manifest identity binding mismatch")
+    }
+    let nonce = try AES.GCM.Nonce(data: envelope.nonce)
+    let box = try AES.GCM.SealedBox(nonce: nonce, ciphertext: envelope.ciphertext, tag: envelope.tag)
+    let plaintext = try AES.GCM.open(box, using: context.pairwiseKey)
+    let payload = try JSONDecoder().decode(TelemetryMediaManifestPayload.self, from: plaintext)
+    let manifest = payload.manifest
+    try Self.validateManifest(manifest)
+    guard payload.kind == "media-manifest", manifest.assetId == record.assetId else {
+      throw TelemetryMediaError.message("Outgoing media manifest does not match local asset")
+    }
+
+    let keyData = try Self.unb64url(manifest.contentKey)
+    let key = SymmetricKey(data: keyData)
+    let tempURL = targetURL.deletingLastPathComponent()
+      .appendingPathComponent(".recover-\(UUID().uuidString)")
+    try FileManager.default.createDirectory(at: targetURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+    FileManager.default.createFile(atPath: tempURL.path, contents: nil)
+    let output = try FileHandle(forWritingTo: tempURL)
+    do {
+      for index in 0..<manifest.chunkCount {
+        let wire = try Data(contentsOf: outgoingChunkURL(assetDir: assetDir, index: index))
+        let chunk = try Self.decodeChunkWire(wire)
+        try Self.validateChunk(chunk, manifest: manifest)
+        let clear = try Self.decryptChunk(chunk, key: key)
+        try output.write(contentsOf: clear)
+      }
+      try output.close()
+      let values = try tempURL.resourceValues(forKeys: [.fileSizeKey])
+      guard Int64(values.fileSize ?? -1) == manifest.byteLength,
+            try Self.sha256File(tempURL) == manifest.sha256 else {
+        throw TelemetryMediaError.message("Recovered outgoing media failed integrity verification")
+      }
+      try? FileManager.default.removeItem(at: targetURL)
+      try FileManager.default.moveItem(at: tempURL, to: targetURL)
+    } catch {
+      try? output.close()
+      try? FileManager.default.removeItem(at: tempURL)
+      throw error
+    }
+  }
+
   func handleIncoming(deviceId: String, frame: Data) throws -> Data {
     guard let context = contextForDeviceId(deviceId) else {
       throw TelemetryMediaError.message("Incoming media sender is not a trusted contact")

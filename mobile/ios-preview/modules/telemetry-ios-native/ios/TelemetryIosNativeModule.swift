@@ -21,6 +21,7 @@ private let receiptContext = "telemetry/m1b/receipt"
 private let maxClockSkewMs: Int64 = 15 * 60 * 1000
 private let maxTextBytes = 160
 private let profileControlPrefix = "\u{2063}TLM_PROFILE:"
+private let callControlPrefix = "\u{2063}TLM_CALL:"
 
 private enum TelemetryNativeError: LocalizedError {
   case message(String)
@@ -991,6 +992,7 @@ private final class TelemetryIosCore: NSObject, CBCentralManagerDelegate, CBPeri
   private var wifiFailureLaunchHookConsumed = false
   private var payloadProbeLaunchStarted = false
   private var mediaProbeTargetDeviceIds = Set<String>()
+  private var callProbeTargetDeviceIds = Set<String>()
   private var lastNativeProfileSyncAt: [String: Int64] = [:]
   private lazy var wifiTransport: TelemetryWifiTransport = {
     let transport = TelemetryWifiTransport()
@@ -1012,6 +1014,7 @@ private final class TelemetryIosCore: NSObject, CBCentralManagerDelegate, CBPeri
         self?.availableWifiPeerDeviceIds.insert(deviceId)
         self?.probeDiscoveredPeerForTrustedWifiDevice(deviceId)
         self?.scheduleMediaProbeIfRequested(deviceId: deviceId)
+        self?.scheduleCallProbeIfRequested(deviceId: deviceId)
         Task { [weak self] in
           _ = await self?.mediaRuntime.resumePending(peerDeviceId: deviceId)
         }
@@ -1065,6 +1068,7 @@ private final class TelemetryIosCore: NSObject, CBCentralManagerDelegate, CBPeri
       }
       if available {
         self.scheduleMediaProbeIfRequested(deviceId: deviceId)
+        self.scheduleCallProbeIfRequested(deviceId: deviceId)
         Task { [weak self] in
           _ = await self?.mediaRuntime.resumePending(peerDeviceId: deviceId)
         }
@@ -1403,6 +1407,33 @@ private final class TelemetryIosCore: NSObject, CBCentralManagerDelegate, CBPeri
     }
   }()
 
+  private func scheduleCallProbeIfRequested(deviceId: String) {
+    guard reliabilityLoggingEnabled,
+          !callProbeTargetDeviceIds.contains(deviceId),
+          let argument = ProcessInfo.processInfo.arguments.first(where: { $0.hasPrefix("--telemetry-call-probe=") }) else { return }
+    let requested = argument.replacingOccurrences(of: "--telemetry-call-probe=", with: "")
+    guard ["voice", "video"].contains(requested),
+          let peerId = peerIdForDeviceId(deviceId),
+          trust.trustedKeyMaterial(deviceId: deviceId) != nil else { return }
+    callProbeTargetDeviceIds.insert(deviceId)
+    let callId = "probe-" + UUID().uuidString.lowercased()
+    Task { @MainActor [weak self] in
+      guard let self else { return }
+      do {
+        _ = try await self.sendCallSignal(
+          peerId: peerId,
+          peerDeviceId: deviceId,
+          callId: callId,
+          action: "invite",
+          mode: requested
+        )
+        print("[TelemetryCallProbe] SENT peer=\(deviceId) mode=\(requested) callId=\(callId)")
+      } catch {
+        print("[TelemetryCallProbe] FAIL peer=\(deviceId) error=\(error.localizedDescription)")
+      }
+    }
+  }
+
   private func scheduleMediaProbeIfRequested(deviceId: String) {
     guard reliabilityLoggingEnabled,
           !mediaProbeTargetDeviceIds.contains(deviceId),
@@ -1508,7 +1539,10 @@ private final class TelemetryIosCore: NSObject, CBCentralManagerDelegate, CBPeri
   }
 
   func localStatePayload() -> String {
-    vault.payload()
+    for payload in mediaRuntime.recoverDurableOutgoingPreviews() {
+      vault.upsertMediaEvent(payload)
+    }
+    return vault.payload()
   }
 
   func setAppearance(_ mode: String) -> String {
@@ -1673,6 +1707,7 @@ private final class TelemetryIosCore: NSObject, CBCentralManagerDelegate, CBPeri
     probeCooldownUntil.removeAll()
     availableWifiPeerDeviceIds.removeAll()
     mediaProbeTargetDeviceIds.removeAll()
+    callProbeTargetDeviceIds.removeAll()
     lastNativeProfileSyncAt.removeAll()
     emit("onState", ["state": "stopped"])
   }
@@ -1827,6 +1862,7 @@ private final class TelemetryIosCore: NSObject, CBCentralManagerDelegate, CBPeri
       print("[TelemetryBLEMedia] trusted-check peer=\(peerId) available=\(bleMediaAvailable(deviceId: remote.deviceId)) sharedMessageChannel=true")
     }
     scheduleMediaProbeIfRequested(deviceId: remote.deviceId)
+    scheduleCallProbeIfRequested(deviceId: remote.deviceId)
     Task { [weak self] in
       let resumed = await self?.mediaRuntime.resumePending(peerDeviceId: remote.deviceId) ?? 0
       if self?.reliabilityLoggingEnabled == true { print("[TelemetryBLEMedia] trusted-resume peer=\(peerId) count=\(resumed)") }
@@ -1921,6 +1957,63 @@ private final class TelemetryIosCore: NSObject, CBCentralManagerDelegate, CBPeri
     }
 
     let messageId = "profile:" + UUID().uuidString.lowercased()
+    let message = try TelemetryCryptoEngine.encryptText(
+      key: key,
+      senderId: crypto.deviceId,
+      recipientId: remote.deviceId,
+      text: clear,
+      messageId: messageId
+    )
+    let frame = try FrameCodec.encodeMessage(message)
+    session.lastOutboundFrame = frame
+
+    if wifiTransport.isAvailable(deviceId: remote.deviceId) {
+      let receipt = try await wifiTransport.send(deviceId: remote.deviceId, frame: frame)
+      DispatchQueue.main.async { [weak self] in
+        guard let self else { return }
+        try? self.acceptReceipt(peerId: peerId, frame: receipt)
+      }
+      return messageId
+    }
+
+    try sendFrameOverBle(peerId: peerId, session: session, frame: frame, messageId: messageId)
+    return messageId
+  }
+
+  @MainActor
+  func sendCallSignal(
+    peerId: String,
+    peerDeviceId: String,
+    callId: String,
+    action: String,
+    mode: String
+  ) async throws -> String {
+    guard ["invite", "end", "decline"].contains(action), ["voice", "video"].contains(mode) else {
+      throw TelemetryNativeError.message("Unsupported call signal")
+    }
+    guard callId.count >= 8, callId.count <= 64 else {
+      throw TelemetryNativeError.message("Invalid call identifier")
+    }
+    guard let session = sessions[peerId],
+          let remote = session.remoteHello,
+          let key = session.sessionKey else {
+      throw TelemetryNativeError.message("Secure peer session is incomplete")
+    }
+    guard trust.isVerified(remote), remote.deviceId == peerDeviceId else {
+      throw TelemetryNativeError.message("Trusted call peer binding mismatch")
+    }
+
+    let payload = ["a": action, "m": mode, "c": callId]
+    let jsonData = try JSONSerialization.data(withJSONObject: payload, options: [])
+    guard let json = String(data: jsonData, encoding: .utf8) else {
+      throw TelemetryNativeError.message("Could not encode call signal")
+    }
+    let clear = callControlPrefix + json
+    guard clear.utf8.count <= maxTextBytes else {
+      throw TelemetryNativeError.message("Call control frame is too large")
+    }
+
+    let messageId = "call:" + UUID().uuidString.lowercased()
     let message = try TelemetryCryptoEngine.encryptText(
       key: key,
       senderId: crypto.deviceId,
@@ -2396,6 +2489,28 @@ private final class TelemetryIosCore: NSObject, CBCentralManagerDelegate, CBPeri
       }
       return receipt
     }
+    if message.messageId.hasPrefix("call:") && clear.hasPrefix(callControlPrefix) {
+      guard replay.accept(message.messageId) else { return receipt }
+      let raw = String(clear.dropFirst(callControlPrefix.count))
+      guard let data = raw.data(using: .utf8),
+            let payload = try? JSONSerialization.jsonObject(with: data) as? [String: String],
+            let action = payload["a"], ["invite", "end", "decline"].contains(action),
+            let mode = payload["m"], ["voice", "video"].contains(mode),
+            let callId = payload["c"], callId.count >= 8, callId.count <= 64 else {
+        throw TelemetryNativeError.message("Malformed encrypted call signal")
+      }
+      if reliabilityLoggingEnabled {
+        print("[TelemetryCallSignal] RECEIVED peer=\(remote.deviceId) action=\(action) mode=\(mode) callId=\(callId)")
+      }
+      emit("onCallSignal", [
+        "peerId": peerId,
+        "deviceId": remote.deviceId,
+        "callId": callId,
+        "action": action,
+        "mode": mode
+      ])
+      return receipt
+    }
     if vault.containsIncomingMessage(id: message.messageId, peerDeviceId: remote.deviceId) {
       duplicateFramesSuppressed += 1
       if reliabilityLoggingEnabled {
@@ -2444,7 +2559,7 @@ private final class TelemetryIosCore: NSObject, CBCentralManagerDelegate, CBPeri
     guard TelemetryCryptoEngine.verifyReceipt(receipt, peerSigningKey: remote.signingPublicKey) else {
       throw TelemetryNativeError.message("Invalid signed delivery receipt")
     }
-    if receipt.messageId.hasPrefix("profile:") {
+    if receipt.messageId.hasPrefix("profile:") || receipt.messageId.hasPrefix("call:") {
       if session.lastOutboundMessageId == receipt.messageId {
         session.lastOutboundMessageId = nil
       }
@@ -2843,6 +2958,7 @@ public class TelemetryIosNativeModule: Module {
       "onProfile",
       "onDelivery",
       "onMedia",
+      "onCallSignal",
       "onNotificationOpen",
       "onError"
     )
@@ -2948,6 +3064,16 @@ public class TelemetryIosNativeModule: Module {
 
     AsyncFunction("sendQueuedTextUsingTransport") { (peerId: String, messageId: String, transport: String) async throws -> String in
       try await self.core.sendQueuedTextUsingTransport(peerId: peerId, messageId: messageId, transport: transport)
+    }
+
+    AsyncFunction("sendCallSignal") { (peerId: String, peerDeviceId: String, callId: String, action: String, mode: String) async throws -> String in
+      try await self.core.sendCallSignal(
+        peerId: peerId,
+        peerDeviceId: peerDeviceId,
+        callId: callId,
+        action: action,
+        mode: mode
+      )
     }
 
     AsyncFunction("sendMedia") { (peerDeviceId: String, uri: String, kind: String, mimeType: String, fileName: String) async throws -> String in

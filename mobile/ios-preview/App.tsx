@@ -170,6 +170,11 @@ export default function App() {
   const [mediaViewerAssetId, setMediaViewerAssetId] = useState<string | null>(null);
   const [contactInfoOpen, setContactInfoOpen] = useState(false);
   const [callMode, setCallMode] = useState<'voice' | 'video' | null>(null);
+  const [callId, setCallId] = useState<string | null>(null);
+  const [callDirection, setCallDirection] = useState<'outgoing' | 'incoming'>('outgoing');
+  const [callMuted, setCallMuted] = useState(false);
+  const [callSpeaker, setCallSpeaker] = useState(false);
+  const [callCameraOff, setCallCameraOff] = useState(false);
   const { width: viewportWidth, height: viewportHeight } = useWindowDimensions();
   const resolvedAppearance = appearanceMode === 'system' ? (systemScheme === 'light' ? 'light' : 'dark') : appearanceMode;
   C = resolvedAppearance === 'light' ? LIGHT_COLORS : DARK_COLORS;
@@ -424,6 +429,31 @@ export default function App() {
         }
         refreshReliabilityDiagnostics();
       }),
+      Telemetry.addListener('onCallSignal', event => {
+        if (event.action === 'invite') {
+          const peer = { peerId: event.peerId, deviceId: event.deviceId };
+          trustedPeerRef.current = peer;
+          setTrustedPeer(peer);
+          setTab('Chats');
+          setChatOpen(true);
+          setContactInfoOpen(false);
+          setMediaViewerAssetId(null);
+          setAttachmentMenuOpen(false);
+          setCallDirection('incoming');
+          setCallId(event.callId);
+          setCallMode(event.mode);
+          setCallMuted(false);
+          setCallSpeaker(event.mode === 'voice');
+          setCallCameraOff(false);
+          return;
+        }
+        setCallMode(null);
+        setCallId(null);
+        setCallDirection('outgoing');
+        setCallMuted(false);
+        setCallSpeaker(false);
+        setCallCameraOff(false);
+      }),
       Telemetry.addListener('onMedia', event => {
         if (event.fileName === '__telemetry_media_probe.bin') return;
         if (event.fileName === '__telemetry_profile_avatar.jpg') {
@@ -556,9 +586,14 @@ export default function App() {
   const activeMediaTransfers = Object.values(mediaTransfers)
     .filter(item => !trustedPeer?.deviceId || !item.peerDeviceId || item.peerDeviceId === trustedPeer.deviceId)
     .sort((a, b) => a.updatedAt - b.updatedAt);
-  const photoMediaTransfers = activeMediaTransfers.filter(item =>
-    item.kind === 'photo' && !!item.localUri && (item.state === 'outgoingComplete' || item.state === 'incomingReady')
-  );
+  const photoMediaTransfers = activeMediaTransfers.filter(item => {
+    const mine = item.state.startsWith('outgoing') || item.state === 'paused';
+    const done = item.acknowledgedChunks ?? item.receivedChunks ?? 0;
+    const total = Math.max(1, item.totalChunks || 1);
+    const ackComplete = mine && total > 0 && done >= total;
+    return item.kind === 'photo' && !!item.localUri &&
+      (item.state === 'outgoingComplete' || item.state === 'incomingReady' || ackComplete);
+  });
   const mediaViewerIndex = Math.max(0, photoMediaTransfers.findIndex(item => item.assetId === mediaViewerAssetId));
   const verifiedSharedMedia = activeMediaTransfers.filter(item => item.state === 'outgoingComplete' || item.state === 'incomingReady');
 
@@ -572,10 +607,41 @@ export default function App() {
   }
 
   function openCall(mode: 'voice' | 'video') {
-    setCallMode(mode);
+    const peer = trustedPeer;
+    if (!peer?.deviceId) {
+      Alert.alert('Telemetry', 'Open a trusted conversation before starting a call.');
+      return;
+    }
+    const nextCallId = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 12)}`;
+    setMediaViewerAssetId(null);
+    setAttachmentMenuOpen(false);
     setContactInfoOpen(false);
-    setChatOpen(false);
-    setTab('Calls');
+    setCallMuted(false);
+    setCallSpeaker(mode === 'voice');
+    setCallCameraOff(false);
+    setCallDirection('outgoing');
+    setCallId(nextCallId);
+    setCallMode(mode);
+    void Telemetry.sendCallSignal(peer.peerId, peer.deviceId, nextCallId, 'invite', mode).catch(error => {
+      setCallMode(null);
+      setCallId(null);
+      Alert.alert('Call unavailable', friendlyErrorMessage(error instanceof Error ? error.message : String(error)));
+    });
+  }
+
+  function endCall() {
+    const peer = trustedPeerRef.current;
+    const activeCallId = callId;
+    const activeMode = callMode;
+    if (peer && activeCallId && activeMode) {
+      void Telemetry.sendCallSignal(peer.peerId, peer.deviceId, activeCallId, callDirection === 'incoming' ? 'decline' : 'end', activeMode).catch(() => {});
+    }
+    setCallMode(null);
+    setCallId(null);
+    setCallDirection('outgoing');
+    setCallMuted(false);
+    setCallSpeaker(false);
+    setCallCameraOff(false);
   }
 
   const routeLabel = sessionReady
@@ -1676,30 +1742,63 @@ export default function App() {
               </ScrollView>
             </View>
           )}
-        </SafeAreaView>
-      </Modal>
-
-      <Modal visible={!!mediaViewerAssetId} transparent animationType="fade" onRequestClose={() => setMediaViewerAssetId(null)}>
-        <View style={styles.mediaViewerBackdrop}>
-          <Pressable style={styles.mediaViewerClose} onPress={() => setMediaViewerAssetId(null)} hitSlop={12}>
-            <SymbolView name={'xmark' as any} size={24} tintColor="#FFF" weight="semibold" />
-          </Pressable>
-          <FlatList
-            key={mediaViewerAssetId ?? 'viewer'}
-            data={photoMediaTransfers}
-            horizontal
-            pagingEnabled
-            showsHorizontalScrollIndicator={false}
-            initialScrollIndex={mediaViewerIndex}
-            getItemLayout={(_, index) => ({ length: viewportWidth, offset: viewportWidth * index, index })}
-            keyExtractor={item => item.assetId}
-            renderItem={({ item }) => (
-              <View style={[styles.mediaViewerPage, { width: viewportWidth, height: viewportHeight }]}>
-                <Image source={{ uri: item.localUri }} style={styles.mediaViewerImage} resizeMode="contain" />
+          {!!mediaViewerAssetId && (
+            <View style={[StyleSheet.absoluteFill, styles.mediaViewerBackdrop, { zIndex: 300 }]}>
+              <Pressable style={styles.mediaViewerClose} onPress={() => setMediaViewerAssetId(null)} hitSlop={12}>
+                <SymbolView name={'xmark' as any} size={24} tintColor="#FFF" weight="semibold" />
+              </Pressable>
+              <FlatList
+                key={mediaViewerAssetId ?? 'viewer'}
+                data={photoMediaTransfers}
+                horizontal
+                pagingEnabled
+                showsHorizontalScrollIndicator={false}
+                initialScrollIndex={mediaViewerIndex}
+                getItemLayout={(_, index) => ({ length: viewportWidth, offset: viewportWidth * index, index })}
+                keyExtractor={item => item.assetId}
+                renderItem={({ item }) => (
+                  <View style={[styles.mediaViewerPage, { width: viewportWidth, height: viewportHeight }]}>
+                    <Image source={{ uri: item.localUri }} style={styles.mediaViewerImage} resizeMode="contain" />
+                  </View>
+                )}
+              />
+            </View>
+          )}
+          {!!callMode && !!trustedPeer && (
+            <View style={[StyleSheet.absoluteFill, styles.callOverlay, { zIndex: 320 }]}>
+              <View style={styles.callTopBar}>
+                <Text style={styles.callSecurity}>END-TO-END ENCRYPTED</Text>
               </View>
-            )}
-          />
-        </View>
+              <View style={styles.callHero}>
+                <PeerAvatar name={activePeerName} photoUri={activeContact?.profilePhotoUri} templateId={activeContact?.profileTemplateId} trusted size={callMode === 'video' ? 126 : 146} />
+                <Text style={styles.callPeerName}>{activePeerName}</Text>
+                <Text style={styles.callStatus}>{callDirection === 'incoming' ? (callMode === 'video' ? 'Incoming video call' : 'Incoming voice call') : (callMode === 'video' ? 'Video calling…' : 'Calling…')}</Text>
+                <Text style={styles.callRoute}>{callDirection === 'incoming' ? 'Encrypted peer is calling this device' : `Encrypted invite sent · ${chatRouteLabel}`}</Text>
+              </View>
+              <View style={styles.callControls}>
+                <Pressable style={[styles.callControl, callMuted && styles.callControlActive]} onPress={() => setCallMuted(value => !value)}>
+                  <SymbolView name={(callMuted ? 'mic.slash.fill' : 'mic.fill') as any} size={23} tintColor="#FFF" />
+                  <Text style={styles.callControlLabel}>{callMuted ? 'Unmute' : 'Mute'}</Text>
+                </Pressable>
+                {callMode === 'video' ? (
+                  <Pressable style={[styles.callControl, callCameraOff && styles.callControlActive]} onPress={() => setCallCameraOff(value => !value)}>
+                    <SymbolView name={(callCameraOff ? 'video.slash.fill' : 'video.fill') as any} size={23} tintColor="#FFF" />
+                    <Text style={styles.callControlLabel}>{callCameraOff ? 'Camera on' : 'Camera off'}</Text>
+                  </Pressable>
+                ) : (
+                  <Pressable style={[styles.callControl, callSpeaker && styles.callControlActive]} onPress={() => setCallSpeaker(value => !value)}>
+                    <SymbolView name={'speaker.wave.2.fill' as any} size={23} tintColor="#FFF" />
+                    <Text style={styles.callControlLabel}>Speaker</Text>
+                  </Pressable>
+                )}
+                <Pressable style={[styles.callControl, styles.callEndControl]} onPress={endCall}>
+                  <SymbolView name={'phone.down.fill' as any} size={24} tintColor="#FFF" />
+                  <Text style={styles.callControlLabel}>End</Text>
+                </Pressable>
+              </View>
+            </View>
+          )}
+        </SafeAreaView>
       </Modal>
     </SafeAreaView>
   );
@@ -1740,7 +1839,7 @@ function MediaTransferCard({ item, onOpenPhoto }: { item: MediaTransferView; onO
       <View style={styles.mediaInfo}>
         <Text style={styles.mediaFileName} numberOfLines={2}>{item.fileName}</Text>
         <Text style={styles.mediaMeta}>{formatBytes(item.byteLength)} · {item.kind.toUpperCase()}</Text>
-        <View style={styles.mediaProgressTrack}><View style={[styles.mediaProgressFill, { width: `${percent}%` }]} /></View>
+        {!complete && <View style={styles.mediaProgressTrack}><View style={[styles.mediaProgressFill, { width: `${percent}%` }]} /></View>}
         <Text style={styles.mediaStatus}>{label}</Text>
       </View>
     </BlurView>
@@ -2108,6 +2207,18 @@ function createStyles(C: ThemeColors) {
   mediaViewerClose: { position: 'absolute', top: 54, right: 20, width: 44, height: 44, borderRadius: 22, alignItems: 'center', justifyContent: 'center', backgroundColor: 'rgba(0,0,0,0.52)', zIndex: 20 },
   mediaViewerPage: { alignItems: 'center', justifyContent: 'center', backgroundColor: '#000' },
   mediaViewerImage: { width: '100%', height: '100%' },
+  callOverlay: { backgroundColor: '#05070B', justifyContent: 'space-between', paddingTop: 58, paddingBottom: 42 },
+  callTopBar: { alignItems: 'center', paddingHorizontal: 24 },
+  callSecurity: { color: C.cyan, fontSize: 10, fontWeight: '800', letterSpacing: 1.3 },
+  callHero: { flex: 1, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 28, gap: 10 },
+  callPeerName: { color: '#FFF', fontSize: 30, lineHeight: 36, fontWeight: '800', marginTop: 10, textAlign: 'center' },
+  callStatus: { color: '#FFF', fontSize: 17, fontWeight: '600' },
+  callRoute: { color: '#91A4BC', fontSize: 11, textAlign: 'center', marginTop: 2 },
+  callControls: { flexDirection: 'row', justifyContent: 'center', alignItems: 'center', gap: 18, paddingHorizontal: 20 },
+  callControl: { width: 78, height: 78, borderRadius: 39, alignItems: 'center', justifyContent: 'center', gap: 4, backgroundColor: '#1B2635', borderWidth: 1, borderColor: '#33475F' },
+  callControlActive: { backgroundColor: '#33475F' },
+  callEndControl: { backgroundColor: '#D92D20', borderColor: '#F04438' },
+  callControlLabel: { color: '#FFF', fontSize: 9, fontWeight: '700' },
   send: { width: 48, height: 48, borderRadius: 24, backgroundColor: C.blue, alignItems: 'center', justifyContent: 'center' },
   sendDisabled: { opacity: 0.38 },
   });

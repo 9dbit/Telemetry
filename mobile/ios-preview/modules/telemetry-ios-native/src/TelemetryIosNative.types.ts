@@ -108,6 +108,15 @@ export type DeliveryEvent = {
   messageId: string;
 };
 
+export type CallSignalEvent = {
+  peerId: string;
+  deviceId: string;
+  callId: string;
+  action: 'invite' | 'end' | 'decline';
+  mode: 'voice' | 'video';
+};
+
+
 export type StateEvent = {
   state: string;
   detail?: string;
