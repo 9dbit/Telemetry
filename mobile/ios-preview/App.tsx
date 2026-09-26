@@ -268,11 +268,12 @@ export default function App() {
   useEffect(() => { nearbyTransformRef.current = nearbyTransform; }, [nearbyTransform]);
 
   function openConversationByDeviceId(deviceId: string) {
-    const contact = contactsRef.current.find(item => item.deviceId === deviceId);
+    let contact = contactsRef.current.find(item => item.deviceId === deviceId);
     if (!contact) {
       hydrateLocalState();
-      return;
+      contact = contactsRef.current.find(item => item.deviceId === deviceId);
     }
+    if (!contact) return;
     const peer = { peerId: contact.peerId, deviceId: contact.deviceId };
     trustedPeerRef.current = peer;
     setTrustedPeer(peer);
@@ -348,6 +349,12 @@ export default function App() {
   useEffect(() => {
     setIdentity(Telemetry.getIdentity());
     hydrateLocalState();
+    setTimeout(() => {
+      const pendingDeviceId = Telemetry.consumePendingNotificationOpen();
+      if (!pendingDeviceId) return;
+      hydrateLocalState();
+      openConversationByDeviceId(pendingDeviceId);
+    }, 0);
     refreshReliabilityDiagnostics();
     const launchArguments = Telemetry.getLaunchArguments();
     const payloadProbeLaunch = launchArguments.some(item => item.startsWith('--telemetry-payload-probe='));
@@ -482,6 +489,7 @@ export default function App() {
       }),
       Telemetry.addListener('onProfile', () => hydrateLocalState()),
       Telemetry.addListener('onNotificationOpen', event => {
+        hydrateLocalState();
         Telemetry.consumePendingNotificationOpen();
         openConversationByDeviceId(event.deviceId);
       }),
@@ -543,6 +551,8 @@ export default function App() {
         clearRetryTimer(id);
       }
       hydrateLocalState();
+      const pendingDeviceId = Telemetry.consumePendingNotificationOpen();
+      if (pendingDeviceId) openConversationByDeviceId(pendingDeviceId);
       void recoverPendingTransports();
     });
     const recoveryPulse = setInterval(() => {
@@ -1925,7 +1935,7 @@ export default function App() {
             </View>
           )}
           {mediaPanelOpen && (
-            <View style={[StyleSheet.absoluteFill, styles.mediaPanelOverlay, { zIndex: 240 }]}>
+            <SafeAreaView style={[StyleSheet.absoluteFill, styles.mediaPanelOverlay, { zIndex: 240 }]}>
               <View style={styles.mediaPanelHeader}>
                 <Pressable style={styles.mediaPanelBack} onPress={() => setMediaPanelOpen(false)} hitSlop={10}>
                   <SymbolView name={'chevron.left' as any} size={25} tintColor={C.text} weight="semibold" />
@@ -1990,7 +2000,7 @@ export default function App() {
                   )) : <Text style={styles.mediaPanelEmpty}>No documents shared in this conversation.</Text>}
                 </ScrollView>
               )}
-            </View>
+            </SafeAreaView>
           )}
 
           {!!mediaViewerAssetId && (
@@ -2495,7 +2505,7 @@ function createStyles(C: ThemeColors) {
   attachmentIconCircle: { width: 66, height: 66, borderRadius: 33, alignItems: 'center', justifyContent: 'center', backgroundColor: C.card2, borderWidth: 1, borderColor: C.line },
   attachmentActionText: { color: C.text, fontSize: 11, fontWeight: '700', textAlign: 'center' },
   mediaPanelOverlay: { backgroundColor: C.ink },
-  mediaPanelHeader: { height: 72, paddingHorizontal: 12, flexDirection: 'row', alignItems: 'center', gap: 10, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: C.line },
+  mediaPanelHeader: { height: 64, paddingHorizontal: 12, flexDirection: 'row', alignItems: 'center', gap: 10, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: C.line },
   mediaPanelBack: { width: 42, height: 42, borderRadius: 21, alignItems: 'center', justifyContent: 'center', backgroundColor: C.glass, borderWidth: 1, borderColor: C.line },
   mediaPanelTabs: { flex: 1, height: 44, borderRadius: 22, overflow: 'hidden', flexDirection: 'row', padding: 3, borderWidth: 1, borderColor: C.line },
   mediaPanelTab: { flex: 1, borderRadius: 18, alignItems: 'center', justifyContent: 'center' },
@@ -2504,7 +2514,7 @@ function createStyles(C: ThemeColors) {
   mediaPanelTabTextActive: { color: C.text },
   mediaPanelSelect: { minWidth: 62, height: 42, borderRadius: 21, alignItems: 'center', justifyContent: 'center', backgroundColor: C.glass, borderWidth: 1, borderColor: C.line },
   mediaPanelSelectText: { color: C.text, fontSize: 13, fontWeight: '700' },
-  mediaPanelGrid: { paddingTop: 2, paddingBottom: 28 },
+  mediaPanelGrid: { paddingTop: 6, paddingBottom: 28 },
   mediaPanelGridRow: { gap: 2, marginBottom: 2 },
   mediaGridTile: { flex: 1, maxWidth: '33.1%', aspectRatio: 1, backgroundColor: C.card2, overflow: 'hidden', position: 'relative' },
   mediaGridImage: { width: '100%', height: '100%' },
