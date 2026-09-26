@@ -1,0 +1,54 @@
+name: Apply approved Telemetry notification sound
+
+on:
+  push:
+    branches:
+      - feature/ios-m1.6-webrtc-mesh-gateways
+    paths:
+      - .github/workflows/apply-approved-notification-sound.yml
+
+permissions:
+  contents: write
+
+jobs:
+  apply-sound:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feature/ios-m1.6-webrtc-mesh-gateways
+          fetch-depth: 0
+
+      - name: Apply verified sound asset
+        shell: bash
+        run: |
+          set -euo pipefail
+          SOUND_DIR='mobile/ios-preview/modules/telemetry-ios-native/ios'
+          SRC='/tmp/telemetry-notification-source.mp3'
+          curl -L --fail --silent --show-error \
+            'https://raw.githubusercontent.com/5ifty6ix/custom-sounds/refs/heads/main/new-notification-010-352755.mp3' \
+            -o "$SRC"
+          echo '5be19a030c39e9fef9084d247e1bda23cb947e9e430abfc2e97376e04ff868b3  /tmp/telemetry-notification-source.mp3' | sha256sum -c -
+          if ! command -v ffmpeg >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install -y ffmpeg
+          fi
+          ffmpeg -hide_banner -loglevel error -y -i "$SRC" -vn -c:a adpcm_ima_qt -ar 48000 -ac 2 -f caf "$SOUND_DIR/telemetry-message.caf"
+          python3 - <<'PY'
+          from pathlib import Path
+          swift = Path('mobile/ios-preview/modules/telemetry-ios-native/ios/TelemetryIosNativeModule.swift')
+          pod = Path('mobile/ios-preview/modules/telemetry-ios-native/ios/TelemetryIosNative.podspec')
+          s = swift.read_text()
+          s = s.replace('UNNotificationSoundName("cleng.wav")', 'UNNotificationSoundName("telemetry-message.caf")')
+          swift.write_text(s)
+          p = pod.read_text()
+          p = p.replace("s.resources      = ['cleng.wav']", "s.resources      = ['telemetry-message.caf']")
+          pod.write_text(p)
+          PY
+          rm -f "$SOUND_DIR/cleng.wav"
+          rm -f .github/workflows/apply-approved-notification-sound.yml
+          git config user.name 'Telemetry Sync Bot'
+          git config user.email 'actions@users.noreply.github.com'
+          git add -A
+          git commit -m 'fix(ios): use approved Telemetry notification sound'
+          git push origin HEAD:feature/ios-m1.6-webrtc-mesh-gateways
