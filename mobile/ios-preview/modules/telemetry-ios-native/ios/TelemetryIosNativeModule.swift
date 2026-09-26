@@ -1655,7 +1655,7 @@ private final class TelemetryIosCore: NSObject, CBCentralManagerDelegate, CBPeri
     let content = UNMutableNotificationContent()
     content.title = vault.alias(for: deviceId) ?? "Telemetry …\(deviceId.suffix(8))"
     content.body = text
-    content.sound = UNNotificationSound(named: UNNotificationSoundName("cleng.wav"))
+    content.sound = UNNotificationSound(named: UNNotificationSoundName("telemetry-message.caf"))
     content.threadIdentifier = "telemetry.messages.\(deviceId)"
     content.userInfo = ["deviceId": deviceId]
     content.badge = NSNumber(value: vault.totalUnreadCount())
