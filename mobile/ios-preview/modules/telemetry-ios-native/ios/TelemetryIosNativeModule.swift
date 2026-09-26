@@ -935,7 +935,18 @@ private final class TelemetryIosCore: NSObject, CBCentralManagerDelegate, CBPeri
           return try await self.wifiTransport.send(deviceId: deviceId, frame: frame)
         },
         emit: { [weak self] name, payload in
-          DispatchQueue.main.async { self?.emit(name, payload) }
+          DispatchQueue.main.async {
+            guard let self else { return }
+            if name == "onMedia",
+               payload["state"] as? String == "incomingReady",
+               payload["fileName"] as? String == "__telemetry_profile_avatar.jpg",
+               let deviceId = payload["peerDeviceId"] as? String,
+               let localUri = payload["localUri"] as? String,
+               self.vault.setContactProfilePhoto(deviceId: deviceId, photoUri: localUri) {
+              self.emit("onProfile", ["deviceId": deviceId, "photoUri": localUri])
+            }
+            self.emit(name, payload)
+          }
         }
       )
     } catch {

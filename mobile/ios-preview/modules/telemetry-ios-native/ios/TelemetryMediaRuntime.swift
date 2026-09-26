@@ -591,7 +591,7 @@ final class TelemetryMediaRuntime {
     guard expected == manifest.chunkCount else { throw TelemetryMediaError.message("Media chunk count does not match byte length") }
     guard manifest.sha256.range(of: "^[0-9a-f]{64}$", options: .regularExpression) != nil else { throw TelemetryMediaError.message("Invalid media SHA-256") }
     guard (try? unb64url(manifest.contentKey).count) == 32 else { throw TelemetryMediaError.message("Invalid media content key") }
-    guard ISO8601DateFormatter().date(from: manifest.createdAt) != nil else { throw TelemetryMediaError.message("Invalid media createdAt") }
+    guard validISO8601(manifest.createdAt) else { throw TelemetryMediaError.message("Invalid media createdAt") }
   }
 
   private static func validateChunk(_ chunk: TelemetryMediaChunk, manifest: TelemetryMediaManifest) throws {
@@ -859,6 +859,15 @@ final class TelemetryMediaRuntime {
     }
     guard status == errSecSuccess else { throw TelemetryMediaError.message("Secure random generation failed") }
     return data
+  }
+
+  private static func validISO8601(_ value: String) -> Bool {
+    let fractional = ISO8601DateFormatter()
+    fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+    if fractional.date(from: value) != nil { return true }
+    let standard = ISO8601DateFormatter()
+    standard.formatOptions = [.withInternetDateTime]
+    return standard.date(from: value) != nil
   }
 
   private static func isoNow() -> String {

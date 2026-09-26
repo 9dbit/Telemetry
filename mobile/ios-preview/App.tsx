@@ -377,6 +377,7 @@ export default function App() {
         trustedPeerRef.current = peer;
         setTrustedPeer(peer);
         setSessionReady(true);
+        void syncProfileToPeer(event.peerId, event.deviceId);
         setMessages(current => current.some(item => item.id === event.messageId) ? current : [...current, {
           id: event.messageId,
           text: event.text,
@@ -1088,7 +1089,7 @@ export default function App() {
                       {peerList.map(peer => {
                         const position = peerWorldPosition(peer);
                         const contact = contacts.find(item => item.peerId === peer.peerId);
-                        const name = contact?.alias || peer.name || shortId(peer.peerId);
+                        const name = contact?.alias || contact?.profileDisplayName || peer.name || shortId(peer.peerId);
                         return (
                           <Pressable key={peer.peerId} onPress={() => setSelectedNearbyPeer(peer)} style={[styles.fieldPeer, { left: position.x - 56, top: position.y - 34 }] }>
                             <PeerAvatar name={name} photoUri={contact?.profilePhotoUri} templateId={contact?.profileTemplateId} trusted={!!contact} size={44} />
