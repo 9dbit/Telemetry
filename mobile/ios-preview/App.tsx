@@ -24,8 +24,10 @@ import { BlurView } from 'expo-blur';
 import * as ImagePicker from 'expo-image-picker';
 import * as DocumentPicker from 'expo-document-picker';
 import * as Contacts from 'expo-contacts';
+import * as VideoThumbnails from 'expo-video-thumbnails';
+import { mediaDevices, MediaStream, RTCPeerConnection, RTCIceCandidate, RTCSessionDescription, RTCView } from 'react-native-webrtc';
 import Telemetry from 'telemetry-ios-native';
-import type { AppearanceMode, Contact, LocalProfile, LocalState, MediaEvent, PeerSeenEvent, TelemetryIdentity } from 'telemetry-ios-native';
+import type { AppearanceMode, CallSignalEvent, Contact, LocalProfile, LocalState, MediaEvent, PeerSeenEvent, TelemetryIdentity } from 'telemetry-ios-native';
 
 type Tab = 'Social' | 'Calls' | 'Nearby' | 'Chats' | 'SOS' | 'Settings';
 type Peer = PeerSeenEvent & { lastSeen: number };
@@ -168,6 +170,9 @@ export default function App() {
   const [appearanceMode, setAppearanceMode] = useState<AppearanceMode>('dark');
   const [attachmentMenuOpen, setAttachmentMenuOpen] = useState(false);
   const [mediaViewerAssetId, setMediaViewerAssetId] = useState<string | null>(null);
+  const [mediaPanelOpen, setMediaPanelOpen] = useState(false);
+  const [mediaPanelTab, setMediaPanelTab] = useState<'Media' | 'Links' | 'Docs'>('Media');
+  const [mediaPanelSelectMode, setMediaPanelSelectMode] = useState(false);
   const [contactInfoOpen, setContactInfoOpen] = useState(false);
   const [callMode, setCallMode] = useState<'voice' | 'video' | null>(null);
   const [callId, setCallId] = useState<string | null>(null);
@@ -175,6 +180,9 @@ export default function App() {
   const [callMuted, setCallMuted] = useState(false);
   const [callSpeaker, setCallSpeaker] = useState(false);
   const [callCameraOff, setCallCameraOff] = useState(false);
+  const [callStatus, setCallStatus] = useState<'ringing' | 'connecting' | 'connected'>('connecting');
+  const [localCallStream, setLocalCallStream] = useState<MediaStream | null>(null);
+  const [remoteCallStream, setRemoteCallStream] = useState<MediaStream | null>(null);
   const { width: viewportWidth, height: viewportHeight } = useWindowDimensions();
   const resolvedAppearance = appearanceMode === 'system' ? (systemScheme === 'light' ? 'light' : 'dark') : appearanceMode;
   C = resolvedAppearance === 'light' ? LIGHT_COLORS : DARK_COLORS;
@@ -194,6 +202,11 @@ export default function App() {
   const reliabilityBatchRef = useRef<Set<string>>(new Set());
   const reliabilityAutoStartedRef = useRef(false);
   const chatListRef = useRef<FlatList<ChatMessage>>(null);
+  const peerConnectionRef = useRef<RTCPeerConnection | null>(null);
+  const pendingIceRef = useRef<RTCIceCandidate[]>([]);
+  const callIdRef = useRef<string | null>(null);
+  const callModeRef = useRef<'voice' | 'video' | null>(null);
+  const localCallStreamRef = useRef<MediaStream | null>(null);
   const nearbyTransformRef = useRef({ x: 0, y: 0, scale: 1 });
   const nearbyGestureStartRef = useRef({ x: 0, y: 0, scale: 1, pinchDistance: 0 });
   const nearbyResponder = useMemo(() => PanResponder.create({
@@ -247,6 +260,11 @@ export default function App() {
   useEffect(() => { profileRef.current = profile; }, [profile]);
   useEffect(() => { trustedPeerRef.current = trustedPeer; }, [trustedPeer]);
   useEffect(() => { chatOpenRef.current = chatOpen; }, [chatOpen]);
+  useEffect(() => { callIdRef.current = callId; }, [callId]);
+  useEffect(() => { callModeRef.current = callMode; }, [callMode]);
+  useEffect(() => { localCallStreamRef.current = localCallStream; }, [localCallStream]);
+  useEffect(() => { localCallStream?.getAudioTracks().forEach(track => { track.enabled = !callMuted; }); }, [callMuted, localCallStream]);
+  useEffect(() => { localCallStream?.getVideoTracks().forEach(track => { track.enabled = !callCameraOff; }); }, [callCameraOff, localCallStream]);
   useEffect(() => { nearbyTransformRef.current = nearbyTransform; }, [nearbyTransform]);
 
   function openConversationByDeviceId(deviceId: string) {
@@ -430,29 +448,11 @@ export default function App() {
         refreshReliabilityDiagnostics();
       }),
       Telemetry.addListener('onCallSignal', event => {
-        if (event.action === 'invite') {
-          const peer = { peerId: event.peerId, deviceId: event.deviceId };
-          trustedPeerRef.current = peer;
-          setTrustedPeer(peer);
-          setTab('Chats');
-          setChatOpen(true);
-          setContactInfoOpen(false);
-          setMediaViewerAssetId(null);
-          setAttachmentMenuOpen(false);
-          setCallDirection('incoming');
-          setCallId(event.callId);
-          setCallMode(event.mode);
-          setCallMuted(false);
-          setCallSpeaker(event.mode === 'voice');
-          setCallCameraOff(false);
-          return;
-        }
-        setCallMode(null);
-        setCallId(null);
-        setCallDirection('outgoing');
-        setCallMuted(false);
-        setCallSpeaker(false);
-        setCallCameraOff(false);
+        void handleCallSignal(event).catch(error => {
+          console.warn('[TelemetryCall] signaling error', error);
+          Alert.alert('Call error', friendlyErrorMessage(error instanceof Error ? error.message : String(error)));
+          resetCallUi();
+        });
       }),
       Telemetry.addListener('onMedia', event => {
         if (event.fileName === '__telemetry_media_probe.bin') return;
@@ -598,22 +598,183 @@ export default function App() {
   const verifiedSharedMedia = activeMediaTransfers.filter(item => item.state === 'outgoingComplete' || item.state === 'incomingReady');
 
   function openSharedMediaGallery() {
-    const latest = photoMediaTransfers[photoMediaTransfers.length - 1];
-    if (!latest) {
-      Alert.alert('Media gallery', 'No verified photos have been shared in this conversation yet.');
-      return;
-    }
-    setMediaViewerAssetId(latest.assetId);
+    setAttachmentMenuOpen(false);
+    setMediaPanelTab('Media');
+    setMediaPanelSelectMode(false);
+    setMediaPanelOpen(true);
   }
 
-  function openCall(mode: 'voice' | 'video') {
-    const peer = trustedPeer;
+  function stopCallMedia() {
+    const pc = peerConnectionRef.current;
+    peerConnectionRef.current = null;
+    if (pc) pc.close();
+    const local = localCallStreamRef.current;
+    if (local) local.getTracks().forEach(track => track.stop());
+    localCallStreamRef.current = null;
+    pendingIceRef.current = [];
+    setLocalCallStream(null);
+    setRemoteCallStream(null);
+  }
+
+  function resetCallUi() {
+    stopCallMedia();
+    setCallMode(null);
+    setCallId(null);
+    setCallDirection('outgoing');
+    setCallMuted(false);
+    setCallSpeaker(false);
+    setCallCameraOff(false);
+    setCallStatus('connecting');
+  }
+
+  async function ensureLocalCallMedia(mode: 'voice' | 'video') {
+    const existing = localCallStreamRef.current;
+    if (existing?.getTracks().length) return existing;
+    const stream = await mediaDevices.getUserMedia({
+      audio: true,
+      video: mode === 'video' ? { facingMode: 'user', frameRate: 24 } : false,
+    });
+    localCallStreamRef.current = stream;
+    setLocalCallStream(stream);
+    return stream;
+  }
+
+  async function sendNegotiationSignal(
+    peer: TrustedPeer,
+    activeCallId: string,
+    mode: 'voice' | 'video',
+    action: 'offer' | 'answer' | 'ice',
+    payload: unknown,
+  ) {
+    await Telemetry.sendCallSignal(
+      peer.peerId,
+      peer.deviceId,
+      activeCallId,
+      action,
+      mode,
+      JSON.stringify(payload),
+    );
+  }
+
+  async function ensurePeerConnection(peer: TrustedPeer, activeCallId: string, mode: 'voice' | 'video') {
+    if (peerConnectionRef.current) return peerConnectionRef.current;
+    const local = await ensureLocalCallMedia(mode);
+    const pc = new RTCPeerConnection({ iceServers: [] });
+    peerConnectionRef.current = pc;
+    local.getTracks().forEach(track => pc.addTrack(track, local));
+
+    pc.onicecandidate = (event: any) => {
+      if (!event.candidate) return;
+      const candidate = (event.candidate as any).toJSON?.() ?? event.candidate;
+      void sendNegotiationSignal(peer, activeCallId, mode, 'ice', candidate).catch(error => {
+        console.warn('[TelemetryCall] ICE signal failed', error);
+      });
+    };
+    pc.ontrack = (event: any) => {
+      const stream = event.streams?.[0];
+      if (stream) setRemoteCallStream(stream);
+    };
+    pc.onconnectionstatechange = () => {
+      const state = pc.connectionState;
+      if (state === 'connected') setCallStatus('connected');
+      if (state === 'failed' || state === 'closed') {
+        if (callIdRef.current === activeCallId) {
+          Alert.alert('Call ended', state === 'failed' ? 'The direct peer media path failed.' : 'The call ended.');
+          resetCallUi();
+        }
+      }
+    };
+    return pc;
+  }
+
+  async function flushPendingIce(pc: RTCPeerConnection) {
+    if (!pc.remoteDescription) return;
+    const pending = [...pendingIceRef.current];
+    pendingIceRef.current = [];
+    for (const candidate of pending) {
+      await pc.addIceCandidate(candidate);
+    }
+  }
+
+  async function handleCallSignal(event: CallSignalEvent) {
+    const peer = { peerId: event.peerId, deviceId: event.deviceId };
+    if (event.action === 'invite') {
+      if (callIdRef.current && callIdRef.current !== event.callId) {
+        await Telemetry.sendCallSignal(event.peerId, event.deviceId, event.callId, 'decline', event.mode, null).catch(() => {});
+        return;
+      }
+      trustedPeerRef.current = peer;
+      setTrustedPeer(peer);
+      setTab('Chats');
+      setChatOpen(true);
+      setContactInfoOpen(false);
+      setMediaPanelOpen(false);
+      setMediaViewerAssetId(null);
+      setAttachmentMenuOpen(false);
+      setCallDirection('incoming');
+      setCallId(event.callId);
+      setCallMode(event.mode);
+      setCallMuted(false);
+      setCallSpeaker(event.mode === 'voice');
+      setCallCameraOff(false);
+      setCallStatus('ringing');
+      return;
+    }
+
+    if (!callIdRef.current || callIdRef.current !== event.callId || !callModeRef.current) return;
+    const mode = callModeRef.current;
+    if (event.action === 'end' || event.action === 'decline') {
+      resetCallUi();
+      return;
+    }
+    if (event.action === 'accept') {
+      if (callDirection !== 'outgoing') return;
+      setCallStatus('connecting');
+      const pc = await ensurePeerConnection(peer, event.callId, mode);
+      const offer = await pc.createOffer({ offerToReceiveAudio: true, offerToReceiveVideo: mode === 'video' });
+      await pc.setLocalDescription(offer);
+      await sendNegotiationSignal(peer, event.callId, mode, 'offer', { type: offer.type, sdp: offer.sdp });
+      return;
+    }
+    if (!event.payload) return;
+    if (event.action === 'offer') {
+      const pc = await ensurePeerConnection(peer, event.callId, mode);
+      const offer = JSON.parse(event.payload);
+      await pc.setRemoteDescription(new RTCSessionDescription(offer));
+      await flushPendingIce(pc);
+      const answer = await pc.createAnswer();
+      await pc.setLocalDescription(answer);
+      await sendNegotiationSignal(peer, event.callId, mode, 'answer', { type: answer.type, sdp: answer.sdp });
+      return;
+    }
+    if (event.action === 'answer') {
+      const pc = peerConnectionRef.current;
+      if (!pc) return;
+      const answer = JSON.parse(event.payload);
+      await pc.setRemoteDescription(new RTCSessionDescription(answer));
+      await flushPendingIce(pc);
+      return;
+    }
+    if (event.action === 'ice') {
+      const candidate = new RTCIceCandidate(JSON.parse(event.payload));
+      const pc = peerConnectionRef.current;
+      if (!pc || !pc.remoteDescription) pendingIceRef.current.push(candidate);
+      else await pc.addIceCandidate(candidate);
+    }
+  }
+
+  async function openCall(mode: 'voice' | 'video') {
+    const peer = trustedPeerRef.current;
     if (!peer?.deviceId) {
       Alert.alert('Telemetry', 'Open a trusted conversation before starting a call.');
       return;
     }
     const nextCallId = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 12)}`;
+    resetCallUi();
+    trustedPeerRef.current = peer;
+    setTrustedPeer(peer);
     setMediaViewerAssetId(null);
+    setMediaPanelOpen(false);
     setAttachmentMenuOpen(false);
     setContactInfoOpen(false);
     setCallMuted(false);
@@ -622,26 +783,41 @@ export default function App() {
     setCallDirection('outgoing');
     setCallId(nextCallId);
     setCallMode(mode);
-    void Telemetry.sendCallSignal(peer.peerId, peer.deviceId, nextCallId, 'invite', mode).catch(error => {
-      setCallMode(null);
-      setCallId(null);
+    setCallStatus('connecting');
+    try {
+      await ensureLocalCallMedia(mode);
+      await Telemetry.sendCallSignal(peer.peerId, peer.deviceId, nextCallId, 'invite', mode, null);
+    } catch (error) {
+      resetCallUi();
       Alert.alert('Call unavailable', friendlyErrorMessage(error instanceof Error ? error.message : String(error)));
-    });
+    }
+  }
+
+  async function acceptIncomingCall() {
+    const peer = trustedPeerRef.current;
+    const activeCallId = callIdRef.current;
+    const mode = callModeRef.current;
+    if (!peer || !activeCallId || !mode) return;
+    try {
+      setCallStatus('connecting');
+      await ensurePeerConnection(peer, activeCallId, mode);
+      await Telemetry.sendCallSignal(peer.peerId, peer.deviceId, activeCallId, 'accept', mode, null);
+    } catch (error) {
+      await Telemetry.sendCallSignal(peer.peerId, peer.deviceId, activeCallId, 'decline', mode, null).catch(() => {});
+      resetCallUi();
+      Alert.alert('Call unavailable', friendlyErrorMessage(error instanceof Error ? error.message : String(error)));
+    }
   }
 
   function endCall() {
     const peer = trustedPeerRef.current;
-    const activeCallId = callId;
-    const activeMode = callMode;
+    const activeCallId = callIdRef.current;
+    const activeMode = callModeRef.current;
+    const action = callDirection === 'incoming' && callStatus === 'ringing' ? 'decline' : 'end';
     if (peer && activeCallId && activeMode) {
-      void Telemetry.sendCallSignal(peer.peerId, peer.deviceId, activeCallId, callDirection === 'incoming' ? 'decline' : 'end', activeMode).catch(() => {});
+      void Telemetry.sendCallSignal(peer.peerId, peer.deviceId, activeCallId, action, activeMode, null).catch(() => {});
     }
-    setCallMode(null);
-    setCallId(null);
-    setCallDirection('outgoing');
-    setCallMuted(false);
-    setCallSpeaker(false);
-    setCallCameraOff(false);
+    resetCallUi();
   }
 
   const routeLabel = sessionReady
@@ -1118,6 +1294,12 @@ export default function App() {
     : activeHasPending
       ? 'WAITING FOR PEER'
       : routeLabel;
+  const activeLinks = activeMessages.flatMap(item => {
+    const matches = item.text.match(/https?:\/\/[^\s]+/gi) ?? [];
+    return matches.map(url => ({ id: `${item.id}:${url}`, url, mine: item.mine, timestamp: item.timestamp }));
+  });
+  const sharedMediaItems = verifiedSharedMedia.filter(item => item.kind === 'photo' || item.kind === 'video');
+  const sharedDocs = verifiedSharedMedia.filter(item => item.kind === 'file');
 
   useEffect(() => {
     if (!chatOpen) return;
@@ -1335,12 +1517,12 @@ export default function App() {
               </Pressable>
             </View>
             <Text style={styles.title}>Network</Text>
-            <Text style={styles.copy}>Telemetry chooses the best available route. BLE is live today; longer-range transports plug into the same delivery engine.</Text>
+            <Text style={styles.copy}>Telemetry selects direct links first, then store-and-forward routes. Mesh core and gateway adapters share the same encrypted delivery engine.</Text>
             <TransportCard icon="dot.radiowaves.left.and.right" title="Bluetooth LE" detail="Discovery · bootstrap · direct chat" status={running ? 'ACTIVE' : 'READY'} active />
             <TransportCard icon="wifi" title="Wi‑Fi" detail="Automatic high-bandwidth transport upgrade" status={capabilities.wifiPeerToPeer ? 'ACTIVE' : 'NEXT'} />
-            <TransportCard icon="point.3.connected.trianglepath.dotted" title="Mesh Relay" detail="Store-and-forward · multi-hop routing" status="PLANNED" />
-            <TransportCard icon="antenna.radiowaves.left.and.right" title="LoRa Gateway" detail="Long-range text · SOS · coordinates" status="NODE" />
-            <TransportCard icon="network.badge.shield.half.filled" title="Satellite Gateway" detail="Remote backhaul · emergency escalation" status="GATEWAY" />
+            <TransportCard icon="point.3.connected.trianglepath.dotted" title="Mesh Relay" detail="Signed routes · dedupe · store-and-forward core" status="CORE READY" />
+            <TransportCard icon="antenna.radiowaves.left.and.right" title="LoRa Gateway" detail="Adapter contract · ≤2 KB narrow payload policy" status="HW NEEDED" />
+            <TransportCard icon="network.badge.shield.half.filled" title="Satellite Gateway" detail="Metered adapter · ≤64 KB backhaul policy" status="HW NEEDED" />
             <Text style={styles.section}>Secure session</Text>
             <Metric label="Session" value={sessionReady ? 'TRUSTED · ACTIVE' : trustedPeer ? 'TRUSTED · IDLE' : 'NO PEER'} />
             <Metric label="Identity" value="Ed25519" />
@@ -1352,11 +1534,11 @@ export default function App() {
         {tab === 'SOS' && (
           <ScrollView contentContainerStyle={styles.page}>
             <Text style={styles.title}>SOS</Text>
-            <Text style={styles.copy}>Emergency traffic will receive route priority across BLE, relay nodes, LoRa and satellite gateways as those transports come online.</Text>
+            <Text style={styles.copy}>Emergency traffic is designed to receive route priority across direct links, mesh relay, LoRa and satellite gateways.</Text>
             <View style={styles.sosPanel}>
               <SymbolView name={'sos.circle.fill' as any} size={48} tintColor="#FF5A6E" />
               <Text style={styles.sosTitle}>Emergency relay</Text>
-              <Text style={styles.cardCopy}>Current preview sends only to an active trusted direct peer. Multi-hop fan-out is a later milestone.</Text>
+              <Text style={styles.cardCopy}>Direct SOS is available now. Mesh routing core and gateway contracts are ready; physical LoRa/satellite fan-out requires connected gateway hardware.</Text>
               <Pressable
                 style={styles.sosButton}
                 delayLongPress={1800}
@@ -1742,6 +1924,75 @@ export default function App() {
               </ScrollView>
             </View>
           )}
+          {mediaPanelOpen && (
+            <View style={[StyleSheet.absoluteFill, styles.mediaPanelOverlay, { zIndex: 240 }]}>
+              <View style={styles.mediaPanelHeader}>
+                <Pressable style={styles.mediaPanelBack} onPress={() => setMediaPanelOpen(false)} hitSlop={10}>
+                  <SymbolView name={'chevron.left' as any} size={25} tintColor={C.text} weight="semibold" />
+                </Pressable>
+                <BlurView intensity={48} tint={resolvedAppearance === 'light' ? 'light' : 'dark'} style={styles.mediaPanelTabs}>
+                  {(['Media', 'Links', 'Docs'] as const).map(item => (
+                    <Pressable key={item} style={[styles.mediaPanelTab, mediaPanelTab === item && styles.mediaPanelTabActive]} onPress={() => setMediaPanelTab(item)}>
+                      <Text style={[styles.mediaPanelTabText, mediaPanelTab === item && styles.mediaPanelTabTextActive]}>{item}</Text>
+                    </Pressable>
+                  ))}
+                </BlurView>
+                <Pressable style={styles.mediaPanelSelect} onPress={() => setMediaPanelSelectMode(value => !value)}>
+                  <Text style={styles.mediaPanelSelectText}>{mediaPanelSelectMode ? 'Done' : 'Select'}</Text>
+                </Pressable>
+              </View>
+
+              {mediaPanelTab === 'Media' && (
+                <FlatList
+                  data={sharedMediaItems}
+                  key="media-grid"
+                  numColumns={3}
+                  keyExtractor={item => item.assetId}
+                  contentContainerStyle={styles.mediaPanelGrid}
+                  columnWrapperStyle={styles.mediaPanelGridRow}
+                  ListEmptyComponent={<Text style={styles.mediaPanelEmpty}>No verified media in this conversation yet.</Text>}
+                  ListFooterComponent={sharedMediaItems.length ? <Text style={styles.mediaPanelFooter}>{sharedMediaItems.filter(item => item.kind === 'photo').length} Photos, {sharedMediaItems.filter(item => item.kind === 'video').length} Videos</Text> : null}
+                  renderItem={({ item }) => (
+                    <Pressable
+                      style={styles.mediaGridTile}
+                      onPress={() => {
+                        if (mediaPanelSelectMode) return;
+                        if (item.kind === 'photo' && item.localUri) setMediaViewerAssetId(item.assetId);
+                        else if (item.kind === 'video') Alert.alert('Video', item.fileName);
+                      }}
+                    >
+                      <SharedMediaGridPreview item={item} />
+                      {item.kind === 'video' && <View style={styles.mediaGridVideoBadge}><SymbolView name={'video.fill' as any} size={14} tintColor="#FFF" /></View>}
+                      {mediaPanelSelectMode && <View style={styles.mediaGridSelectMark}><SymbolView name={'circle' as any} size={22} tintColor="#FFF" /></View>}
+                    </Pressable>
+                  )}
+                />
+              )}
+
+              {mediaPanelTab === 'Links' && (
+                <ScrollView contentContainerStyle={styles.mediaPanelList}>
+                  {activeLinks.length ? activeLinks.map(item => (
+                    <View key={item.id} style={styles.mediaPanelListRow}>
+                      <View style={styles.mediaPanelListIcon}><SymbolView name={'link' as any} size={20} tintColor={C.blue} /></View>
+                      <View style={styles.flex}><Text style={styles.mediaPanelListTitle} numberOfLines={1}>{item.url}</Text><Text style={styles.mediaPanelListMeta}>{item.mine ? 'Sent' : 'Received'} · encrypted conversation</Text></View>
+                    </View>
+                  )) : <Text style={styles.mediaPanelEmpty}>No links shared in this conversation.</Text>}
+                </ScrollView>
+              )}
+
+              {mediaPanelTab === 'Docs' && (
+                <ScrollView contentContainerStyle={styles.mediaPanelList}>
+                  {sharedDocs.length ? sharedDocs.map(item => (
+                    <View key={item.assetId} style={styles.mediaPanelListRow}>
+                      <View style={styles.mediaPanelListIcon}><SymbolView name={'doc.fill' as any} size={21} tintColor={C.blue} /></View>
+                      <View style={styles.flex}><Text style={styles.mediaPanelListTitle} numberOfLines={1}>{item.fileName}</Text><Text style={styles.mediaPanelListMeta}>{formatBytes(item.byteLength)} · verified locally</Text></View>
+                    </View>
+                  )) : <Text style={styles.mediaPanelEmpty}>No documents shared in this conversation.</Text>}
+                </ScrollView>
+              )}
+            </View>
+          )}
+
           {!!mediaViewerAssetId && (
             <View style={[StyleSheet.absoluteFill, styles.mediaViewerBackdrop, { zIndex: 300 }]}>
               <Pressable style={styles.mediaViewerClose} onPress={() => setMediaViewerAssetId(null)} hitSlop={12}>
@@ -1766,42 +2017,82 @@ export default function App() {
           )}
           {!!callMode && !!trustedPeer && (
             <View style={[StyleSheet.absoluteFill, styles.callOverlay, { zIndex: 320 }]}>
+              {callMode === 'video' && remoteCallStream ? (
+                <RTCView streamURL={remoteCallStream.toURL()} objectFit="cover" mirror={false} style={StyleSheet.absoluteFill} />
+              ) : null}
+              {callMode === 'video' && localCallStream ? (
+                <View style={styles.callLocalPreviewWrap}>
+                  <RTCView streamURL={localCallStream.toURL()} objectFit="cover" mirror style={styles.callLocalPreview} />
+                </View>
+              ) : null}
               <View style={styles.callTopBar}>
-                <Text style={styles.callSecurity}>END-TO-END ENCRYPTED</Text>
+                <Text style={styles.callSecurity}>END-TO-END ENCRYPTED · DIRECT PEER</Text>
               </View>
-              <View style={styles.callHero}>
-                <PeerAvatar name={activePeerName} photoUri={activeContact?.profilePhotoUri} templateId={activeContact?.profileTemplateId} trusted size={callMode === 'video' ? 126 : 146} />
-                <Text style={styles.callPeerName}>{activePeerName}</Text>
-                <Text style={styles.callStatus}>{callDirection === 'incoming' ? (callMode === 'video' ? 'Incoming video call' : 'Incoming voice call') : (callMode === 'video' ? 'Video calling…' : 'Calling…')}</Text>
-                <Text style={styles.callRoute}>{callDirection === 'incoming' ? 'Encrypted peer is calling this device' : `Encrypted invite sent · ${chatRouteLabel}`}</Text>
-              </View>
-              <View style={styles.callControls}>
-                <Pressable style={[styles.callControl, callMuted && styles.callControlActive]} onPress={() => setCallMuted(value => !value)}>
-                  <SymbolView name={(callMuted ? 'mic.slash.fill' : 'mic.fill') as any} size={23} tintColor="#FFF" />
-                  <Text style={styles.callControlLabel}>{callMuted ? 'Unmute' : 'Mute'}</Text>
-                </Pressable>
-                {callMode === 'video' ? (
-                  <Pressable style={[styles.callControl, callCameraOff && styles.callControlActive]} onPress={() => setCallCameraOff(value => !value)}>
-                    <SymbolView name={(callCameraOff ? 'video.slash.fill' : 'video.fill') as any} size={23} tintColor="#FFF" />
-                    <Text style={styles.callControlLabel}>{callCameraOff ? 'Camera on' : 'Camera off'}</Text>
+              {!remoteCallStream && (
+                <View style={styles.callHero}>
+                  <PeerAvatar name={activePeerName} photoUri={activeContact?.profilePhotoUri} templateId={activeContact?.profileTemplateId} trusted size={callMode === 'video' ? 126 : 146} />
+                  <Text style={styles.callPeerName}>{activePeerName}</Text>
+                  <Text style={styles.callStatus}>{callStatus === 'connected' ? 'Connected' : callDirection === 'incoming' && callStatus === 'ringing' ? (callMode === 'video' ? 'Incoming video call' : 'Incoming voice call') : callStatus === 'connecting' ? 'Connecting securely…' : 'Calling…'}</Text>
+                  <Text style={styles.callRoute}>{callDirection === 'incoming' && callStatus === 'ringing' ? 'Encrypted peer is calling this device' : 'WebRTC media · Telemetry encrypted signaling'}</Text>
+                </View>
+              )}
+              {callDirection === 'incoming' && callStatus === 'ringing' ? (
+                <View style={styles.callControls}>
+                  <Pressable style={[styles.callControl, styles.callEndControl]} onPress={endCall}>
+                    <SymbolView name={'phone.down.fill' as any} size={25} tintColor="#FFF" />
+                    <Text style={styles.callControlLabel}>Decline</Text>
                   </Pressable>
-                ) : (
-                  <Pressable style={[styles.callControl, callSpeaker && styles.callControlActive]} onPress={() => setCallSpeaker(value => !value)}>
-                    <SymbolView name={'speaker.wave.2.fill' as any} size={23} tintColor="#FFF" />
-                    <Text style={styles.callControlLabel}>Speaker</Text>
+                  <Pressable style={[styles.callControl, styles.callAcceptControl]} onPress={() => void acceptIncomingCall()}>
+                    <SymbolView name={(callMode === 'video' ? 'video.fill' : 'phone.fill') as any} size={25} tintColor="#FFF" />
+                    <Text style={styles.callControlLabel}>Accept</Text>
                   </Pressable>
-                )}
-                <Pressable style={[styles.callControl, styles.callEndControl]} onPress={endCall}>
-                  <SymbolView name={'phone.down.fill' as any} size={24} tintColor="#FFF" />
-                  <Text style={styles.callControlLabel}>End</Text>
-                </Pressable>
-              </View>
+                </View>
+              ) : (
+                <View style={styles.callControls}>
+                  <Pressable style={[styles.callControl, callMuted && styles.callControlActive]} onPress={() => setCallMuted(value => !value)}>
+                    <SymbolView name={(callMuted ? 'mic.slash.fill' : 'mic.fill') as any} size={23} tintColor="#FFF" />
+                    <Text style={styles.callControlLabel}>{callMuted ? 'Unmute' : 'Mute'}</Text>
+                  </Pressable>
+                  {callMode === 'video' ? (
+                    <>
+                      <Pressable style={[styles.callControl, callCameraOff && styles.callControlActive]} onPress={() => setCallCameraOff(value => !value)}>
+                        <SymbolView name={(callCameraOff ? 'video.slash.fill' : 'video.fill') as any} size={23} tintColor="#FFF" />
+                        <Text style={styles.callControlLabel}>{callCameraOff ? 'Camera on' : 'Camera off'}</Text>
+                      </Pressable>
+                      <Pressable style={styles.callControl} onPress={() => localCallStreamRef.current?.getVideoTracks()[0]?._switchCamera()}>
+                        <SymbolView name={'camera.rotate.fill' as any} size={23} tintColor="#FFF" />
+                        <Text style={styles.callControlLabel}>Flip</Text>
+                      </Pressable>
+                    </>
+                  ) : null}
+                  <Pressable style={[styles.callControl, styles.callEndControl]} onPress={endCall}>
+                    <SymbolView name={'phone.down.fill' as any} size={24} tintColor="#FFF" />
+                    <Text style={styles.callControlLabel}>End</Text>
+                  </Pressable>
+                </View>
+              )}
             </View>
           )}
         </SafeAreaView>
       </Modal>
     </SafeAreaView>
   );
+}
+
+function SharedMediaGridPreview({ item }: { item: MediaTransferView }) {
+  const [videoThumb, setVideoThumb] = useState<string | null>(null);
+  useEffect(() => {
+    let alive = true;
+    if (item.kind !== 'video' || !item.localUri) { setVideoThumb(null); return () => { alive = false; }; }
+    void VideoThumbnails.getThumbnailAsync(item.localUri, { time: 0, quality: 0.72 })
+      .then(result => { if (alive) setVideoThumb(result.uri); })
+      .catch(() => { if (alive) setVideoThumb(null); });
+    return () => { alive = false; };
+  }, [item.assetId, item.kind, item.localUri]);
+  const uri = item.kind === 'video' ? videoThumb : item.localUri;
+  return uri
+    ? <Image source={{ uri }} style={styles.mediaGridImage} resizeMode="cover" />
+    : <View style={styles.mediaGridFallback}><SymbolView name={(item.kind === 'video' ? 'video.fill' : 'photo.fill') as any} size={25} tintColor={C.muted} /></View>;
 }
 
 function MediaTransferCard({ item, onOpenPhoto }: { item: MediaTransferView; onOpenPhoto?: () => void }) {
@@ -2203,11 +2494,37 @@ function createStyles(C: ThemeColors) {
   attachmentAction: { flex: 1, minHeight: 108, alignItems: 'center', justifyContent: 'flex-start', gap: 10 },
   attachmentIconCircle: { width: 66, height: 66, borderRadius: 33, alignItems: 'center', justifyContent: 'center', backgroundColor: C.card2, borderWidth: 1, borderColor: C.line },
   attachmentActionText: { color: C.text, fontSize: 11, fontWeight: '700', textAlign: 'center' },
+  mediaPanelOverlay: { backgroundColor: C.ink },
+  mediaPanelHeader: { height: 72, paddingHorizontal: 12, flexDirection: 'row', alignItems: 'center', gap: 10, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: C.line },
+  mediaPanelBack: { width: 42, height: 42, borderRadius: 21, alignItems: 'center', justifyContent: 'center', backgroundColor: C.glass, borderWidth: 1, borderColor: C.line },
+  mediaPanelTabs: { flex: 1, height: 44, borderRadius: 22, overflow: 'hidden', flexDirection: 'row', padding: 3, borderWidth: 1, borderColor: C.line },
+  mediaPanelTab: { flex: 1, borderRadius: 18, alignItems: 'center', justifyContent: 'center' },
+  mediaPanelTabActive: { backgroundColor: C.glassStrong },
+  mediaPanelTabText: { color: C.muted, fontSize: 14, fontWeight: '700' },
+  mediaPanelTabTextActive: { color: C.text },
+  mediaPanelSelect: { minWidth: 62, height: 42, borderRadius: 21, alignItems: 'center', justifyContent: 'center', backgroundColor: C.glass, borderWidth: 1, borderColor: C.line },
+  mediaPanelSelectText: { color: C.text, fontSize: 13, fontWeight: '700' },
+  mediaPanelGrid: { paddingTop: 2, paddingBottom: 28 },
+  mediaPanelGridRow: { gap: 2, marginBottom: 2 },
+  mediaGridTile: { flex: 1, maxWidth: '33.1%', aspectRatio: 1, backgroundColor: C.card2, overflow: 'hidden', position: 'relative' },
+  mediaGridImage: { width: '100%', height: '100%' },
+  mediaGridFallback: { width: '100%', height: '100%', alignItems: 'center', justifyContent: 'center', backgroundColor: C.card2 },
+  mediaGridVideoBadge: { position: 'absolute', left: 7, bottom: 7, minWidth: 26, height: 22, borderRadius: 11, backgroundColor: 'rgba(0,0,0,0.58)', alignItems: 'center', justifyContent: 'center' },
+  mediaGridSelectMark: { position: 'absolute', right: 7, top: 7, width: 26, height: 26, borderRadius: 13, backgroundColor: 'rgba(0,0,0,0.42)', alignItems: 'center', justifyContent: 'center' },
+  mediaPanelFooter: { color: C.text, fontSize: 16, textAlign: 'center', marginTop: 20, marginBottom: 18 },
+  mediaPanelEmpty: { color: C.muted, fontSize: 13, textAlign: 'center', paddingHorizontal: 28, paddingVertical: 48 },
+  mediaPanelList: { padding: 14, gap: 10 },
+  mediaPanelListRow: { minHeight: 72, borderRadius: 18, padding: 13, flexDirection: 'row', alignItems: 'center', gap: 12, backgroundColor: C.card, borderWidth: 1, borderColor: C.line },
+  mediaPanelListIcon: { width: 44, height: 44, borderRadius: 14, alignItems: 'center', justifyContent: 'center', backgroundColor: C.card2 },
+  mediaPanelListTitle: { color: C.text, fontSize: 14, fontWeight: '700' },
+  mediaPanelListMeta: { color: C.muted, fontSize: 10, marginTop: 4 },
   mediaViewerBackdrop: { flex: 1, backgroundColor: '#000' },
   mediaViewerClose: { position: 'absolute', top: 54, right: 20, width: 44, height: 44, borderRadius: 22, alignItems: 'center', justifyContent: 'center', backgroundColor: 'rgba(0,0,0,0.52)', zIndex: 20 },
   mediaViewerPage: { alignItems: 'center', justifyContent: 'center', backgroundColor: '#000' },
   mediaViewerImage: { width: '100%', height: '100%' },
   callOverlay: { backgroundColor: '#05070B', justifyContent: 'space-between', paddingTop: 58, paddingBottom: 42 },
+  callLocalPreviewWrap: { position: 'absolute', right: 18, top: 92, width: 118, height: 166, borderRadius: 22, overflow: 'hidden', borderWidth: 2, borderColor: '#FFFFFFAA', zIndex: 10, backgroundColor: '#111' },
+  callLocalPreview: { width: '100%', height: '100%' },
   callTopBar: { alignItems: 'center', paddingHorizontal: 24 },
   callSecurity: { color: C.cyan, fontSize: 10, fontWeight: '800', letterSpacing: 1.3 },
   callHero: { flex: 1, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 28, gap: 10 },
@@ -2218,6 +2535,7 @@ function createStyles(C: ThemeColors) {
   callControl: { width: 78, height: 78, borderRadius: 39, alignItems: 'center', justifyContent: 'center', gap: 4, backgroundColor: '#1B2635', borderWidth: 1, borderColor: '#33475F' },
   callControlActive: { backgroundColor: '#33475F' },
   callEndControl: { backgroundColor: '#D92D20', borderColor: '#F04438' },
+  callAcceptControl: { backgroundColor: '#16A34A', borderColor: '#22C55E' },
   callControlLabel: { color: '#FFF', fontSize: 9, fontWeight: '700' },
   send: { width: 48, height: 48, borderRadius: 24, backgroundColor: C.blue, alignItems: 'center', justifyContent: 'center' },
   sendDisabled: { opacity: 0.38 },

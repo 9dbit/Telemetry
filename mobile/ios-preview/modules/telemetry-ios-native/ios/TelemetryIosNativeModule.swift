@@ -1986,9 +1986,12 @@ private final class TelemetryIosCore: NSObject, CBCentralManagerDelegate, CBPeri
     peerDeviceId: String,
     callId: String,
     action: String,
-    mode: String
+    mode: String,
+    payload: String? = nil
   ) async throws -> String {
-    guard ["invite", "end", "decline"].contains(action), ["voice", "video"].contains(mode) else {
+    let smallActions = ["invite", "accept", "end", "decline"]
+    let dataActions = ["offer", "answer", "ice"]
+    guard (smallActions + dataActions).contains(action), ["voice", "video"].contains(mode) else {
       throw TelemetryNativeError.message("Unsupported call signal")
     }
     guard callId.count >= 8, callId.count <= 64 else {
@@ -2003,8 +2006,42 @@ private final class TelemetryIosCore: NSObject, CBCentralManagerDelegate, CBPeri
       throw TelemetryNativeError.message("Trusted call peer binding mismatch")
     }
 
-    let payload = ["a": action, "m": mode, "c": callId]
-    let jsonData = try JSONSerialization.data(withJSONObject: payload, options: [])
+    var signal: [String: String] = ["a": action, "m": mode, "c": callId]
+    if let payload { signal["p"] = payload }
+    let jsonData = try JSONSerialization.data(withJSONObject: signal, options: [])
+
+    if dataActions.contains(action) {
+      guard payload != nil, jsonData.count <= 96 * 1024 else {
+        throw TelemetryNativeError.message("Call negotiation payload is missing or too large")
+      }
+      let messageId = "call-data:" + UUID().uuidString.lowercased()
+      let message = try TelemetryCryptoEngine.encryptPayload(
+        key: key,
+        senderId: crypto.deviceId,
+        recipientId: remote.deviceId,
+        payload: jsonData,
+        messageId: messageId
+      )
+      let frame = try FrameCodec.encodeMessage(message)
+      session.lastOutboundFrame = frame
+      let receiptFrame: Data
+      if wifiTransport.isAvailable(deviceId: remote.deviceId) {
+        receiptFrame = try await wifiTransport.send(deviceId: remote.deviceId, frame: frame)
+        if reliabilityLoggingEnabled { print("[TelemetryCallSignal] data selected=wifi action=\(action) bytes=\(frame.count)") }
+      } else if mpcTransport.isAvailable(deviceId: remote.deviceId) {
+        receiptFrame = try await mpcTransport.send(deviceId: remote.deviceId, frame: frame)
+        if reliabilityLoggingEnabled { print("[TelemetryCallSignal] data selected=mpc action=\(action) bytes=\(frame.count)") }
+      } else {
+        throw TelemetryNativeError.message("Direct Wi-Fi call route is unavailable")
+      }
+      let receipt = try FrameCodec.decodeReceipt(receiptFrame)
+      guard receipt.messageId == messageId,
+            TelemetryCryptoEngine.verifyReceipt(receipt, peerSigningKey: remote.signingPublicKey) else {
+        throw TelemetryNativeError.message("Call negotiation receipt verification failed")
+      }
+      return messageId
+    }
+
     guard let json = String(data: jsonData, encoding: .utf8) else {
       throw TelemetryNativeError.message("Could not encode call signal")
     }
@@ -2012,7 +2049,6 @@ private final class TelemetryIosCore: NSObject, CBCentralManagerDelegate, CBPeri
     guard clear.utf8.count <= maxTextBytes else {
       throw TelemetryNativeError.message("Call control frame is too large")
     }
-
     let messageId = "call:" + UUID().uuidString.lowercased()
     let message = try TelemetryCryptoEngine.encryptText(
       key: key,
@@ -2026,13 +2062,14 @@ private final class TelemetryIosCore: NSObject, CBCentralManagerDelegate, CBPeri
 
     if wifiTransport.isAvailable(deviceId: remote.deviceId) {
       let receipt = try await wifiTransport.send(deviceId: remote.deviceId, frame: frame)
-      DispatchQueue.main.async { [weak self] in
-        guard let self else { return }
-        try? self.acceptReceipt(peerId: peerId, frame: receipt)
-      }
+      try acceptReceipt(peerId: peerId, frame: receipt)
       return messageId
     }
-
+    if mpcTransport.isAvailable(deviceId: remote.deviceId) {
+      let receipt = try await mpcTransport.send(deviceId: remote.deviceId, frame: frame)
+      try acceptReceipt(peerId: peerId, frame: receipt)
+      return messageId
+    }
     try sendFrameOverBle(peerId: peerId, session: session, frame: frame, messageId: messageId)
     return messageId
   }
@@ -2465,6 +2502,30 @@ private final class TelemetryIosCore: NSObject, CBCentralManagerDelegate, CBPeri
       return receipt
     }
 
+    if message.messageId.hasPrefix("call-data:") {
+      guard replay.accept(message.messageId) else { return receipt }
+      let clearPayload = try TelemetryCryptoEngine.decryptPayload(key: key, message: message)
+      guard let payload = try? JSONSerialization.jsonObject(with: clearPayload) as? [String: String],
+            let action = payload["a"], ["offer", "answer", "ice"].contains(action),
+            let mode = payload["m"], ["voice", "video"].contains(mode),
+            let callId = payload["c"], callId.count >= 8, callId.count <= 64,
+            let body = payload["p"] else {
+        throw TelemetryNativeError.message("Malformed encrypted call negotiation signal")
+      }
+      if reliabilityLoggingEnabled {
+        print("[TelemetryCallSignal] RECEIVED data peer=\(remote.deviceId) action=\(action) mode=\(mode) callId=\(callId) bytes=\(body.utf8.count)")
+      }
+      emit("onCallSignal", [
+        "peerId": peerId,
+        "deviceId": remote.deviceId,
+        "callId": callId,
+        "action": action,
+        "mode": mode,
+        "payload": body
+      ])
+      return receipt
+    }
+
     let clear = try TelemetryCryptoEngine.decryptText(key: key, message: message)
     if message.messageId.hasPrefix("profile:") && clear.hasPrefix(profileControlPrefix) {
       guard replay.accept(message.messageId) else { return receipt }
@@ -2494,7 +2555,7 @@ private final class TelemetryIosCore: NSObject, CBCentralManagerDelegate, CBPeri
       let raw = String(clear.dropFirst(callControlPrefix.count))
       guard let data = raw.data(using: .utf8),
             let payload = try? JSONSerialization.jsonObject(with: data) as? [String: String],
-            let action = payload["a"], ["invite", "end", "decline"].contains(action),
+            let action = payload["a"], ["invite", "accept", "end", "decline"].contains(action),
             let mode = payload["m"], ["voice", "video"].contains(mode),
             let callId = payload["c"], callId.count >= 8, callId.count <= 64 else {
         throw TelemetryNativeError.message("Malformed encrypted call signal")
@@ -2559,7 +2620,7 @@ private final class TelemetryIosCore: NSObject, CBCentralManagerDelegate, CBPeri
     guard TelemetryCryptoEngine.verifyReceipt(receipt, peerSigningKey: remote.signingPublicKey) else {
       throw TelemetryNativeError.message("Invalid signed delivery receipt")
     }
-    if receipt.messageId.hasPrefix("profile:") || receipt.messageId.hasPrefix("call:") {
+    if receipt.messageId.hasPrefix("profile:") || receipt.messageId.hasPrefix("call:") || receipt.messageId.hasPrefix("call-data:") {
       if session.lastOutboundMessageId == receipt.messageId {
         session.lastOutboundMessageId = nil
       }
@@ -3066,13 +3127,14 @@ public class TelemetryIosNativeModule: Module {
       try await self.core.sendQueuedTextUsingTransport(peerId: peerId, messageId: messageId, transport: transport)
     }
 
-    AsyncFunction("sendCallSignal") { (peerId: String, peerDeviceId: String, callId: String, action: String, mode: String) async throws -> String in
+    AsyncFunction("sendCallSignal") { (peerId: String, peerDeviceId: String, callId: String, action: String, mode: String, payload: String?) async throws -> String in
       try await self.core.sendCallSignal(
         peerId: peerId,
         peerDeviceId: peerDeviceId,
         callId: callId,
         action: action,
-        mode: mode
+        mode: mode,
+        payload: payload
       )
     }
 

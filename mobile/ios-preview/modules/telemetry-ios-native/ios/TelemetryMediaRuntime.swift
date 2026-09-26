@@ -86,11 +86,19 @@ final class TelemetryMediaRuntime {
   private static let chunkVersion = "telemetry/media-chunk/0.1"
   private static let manifestContentType = "application/telemetry+media-manifest"
   private static let controlContentType = "application/telemetry+media-control"
-  private static let chunkBytes = 256 * 1024
+  private static let defaultChunkBytes = 256 * 1024
+  private static let photoChunkBytes = 128 * 1024
+  private static let largeFileChunkBytes = 512 * 1024
   private static let maxChunkBytes = 1024 * 1024
   private static let maxAssetBytes: Int64 = 512 * 1024 * 1024
   private static let maxChunks = 8192
   private static let transferTtlMs: Int64 = 7 * 24 * 60 * 60 * 1000
+
+  private static func preferredChunkBytes(kind: String, byteLength: Int64) -> Int {
+    if kind == "photo" { return photoChunkBytes }
+    if (kind == "video" || kind == "file") && byteLength >= 8 * 1024 * 1024 { return largeFileChunkBytes }
+    return defaultChunkBytes
+  }
 
   private let localDeviceId: String
   private let localSigningPublicKey: Data
@@ -380,7 +388,8 @@ final class TelemetryMediaRuntime {
     guard byteLength <= Self.maxAssetBytes else {
       throw TelemetryMediaError.message("Media exceeds the current 512 MB asset limit")
     }
-    let chunkCount = Int((byteLength + Int64(Self.chunkBytes) - 1) / Int64(Self.chunkBytes))
+    let selectedChunkBytes = Self.preferredChunkBytes(kind: kind, byteLength: byteLength)
+    let chunkCount = Int((byteLength + Int64(selectedChunkBytes) - 1) / Int64(selectedChunkBytes))
     guard chunkCount >= 1, chunkCount <= Self.maxChunks else {
       throw TelemetryMediaError.message("Media requires too many encrypted chunks")
     }
@@ -397,7 +406,7 @@ final class TelemetryMediaRuntime {
       mimeType: mimeType,
       fileName: fileName,
       byteLength: byteLength,
-      chunkBytes: Self.chunkBytes,
+      chunkBytes: selectedChunkBytes,
       chunkCount: chunkCount,
       sha256: digest,
       contentKey: Self.b64url(contentKeyData),
@@ -409,7 +418,7 @@ final class TelemetryMediaRuntime {
     defer { try? source.close() }
     let key = SymmetricKey(data: contentKeyData)
     for index in 0..<chunkCount {
-      guard let plain = try source.read(upToCount: Self.chunkBytes), !plain.isEmpty else {
+      guard let plain = try source.read(upToCount: selectedChunkBytes), !plain.isEmpty else {
         throw TelemetryMediaError.message("Selected media ended before expected byte length")
       }
       let wire = try Self.encryptChunkWire(

@@ -112,8 +112,9 @@ export type CallSignalEvent = {
   peerId: string;
   deviceId: string;
   callId: string;
-  action: 'invite' | 'end' | 'decline';
+  action: 'invite' | 'accept' | 'offer' | 'answer' | 'ice' | 'end' | 'decline';
   mode: 'voice' | 'video';
+  payload?: string;
 };
 
 

@@ -53,7 +53,7 @@ declare class TelemetryIosNativeModule extends NativeModule<TelemetryEvents> {
   sendProfile(peerId: string, peerDeviceId: string, displayName: string, templateId?: string | null): Promise<string>;
   sendQueuedText(peerId: string, messageId: string): Promise<string>;
   sendQueuedTextUsingTransport(peerId: string, messageId: string, transport: 'auto' | 'ble' | 'wifi'): Promise<string>;
-  sendCallSignal(peerId: string, peerDeviceId: string, callId: string, action: 'invite' | 'end' | 'decline', mode: 'voice' | 'video'): Promise<string>;
+  sendCallSignal(peerId: string, peerDeviceId: string, callId: string, action: 'invite' | 'accept' | 'offer' | 'answer' | 'ice' | 'end' | 'decline', mode: 'voice' | 'video', payload?: string | null): Promise<string>;
   sendMedia(peerDeviceId: string, uri: string, kind: 'photo' | 'video' | 'file', mimeType: string, fileName: string): Promise<string>;
   resumeMedia(peerDeviceId?: string | null): Promise<number>;
   sendText(peerId: string, text: string): Promise<string>;

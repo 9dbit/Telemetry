@@ -1,6 +1,6 @@
 {
   "expo": {
-    "name": "Telemetry iOS Preview",
+    "name": "Telemetry",
     "slug": "telemetry-ios-preview",
     "version": "0.1.1",
     "orientation": "portrait",
@@ -17,7 +17,8 @@
         "NSBluetoothAlwaysUsageDescription": "Telemetry uses Bluetooth to discover and securely communicate with nearby Telemetry devices without internet.",
         "UIBackgroundModes": [
           "bluetooth-central",
-          "bluetooth-peripheral"
+          "bluetooth-peripheral",
+          "audio"
         ],
         "NSCameraUsageDescription": "Telemetry uses the camera only when you choose Camera to capture media for an encrypted peer-to-peer message.",
         "NSPhotoLibraryUsageDescription": "Telemetry accesses your photo library only when you choose media to send securely to a trusted peer.",
@@ -26,7 +27,8 @@
         "NSBonjourServices": [
           "_telemetry._tcp",
           "_tlm-media._tcp"
-        ]
+        ],
+        "NSMicrophoneUsageDescription": "Telemetry uses the microphone only during encrypted peer-to-peer voice and video calls you start or accept."
       }
     },
     "plugins": [

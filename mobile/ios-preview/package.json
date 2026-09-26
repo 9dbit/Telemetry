@@ -22,8 +22,10 @@
     "expo-font": "~57.0.4",
     "expo-image-picker": "~57.0.20",
     "expo-symbols": "~57.0.3",
+    "expo-video-thumbnails": "~57.0.2",
     "react": "19.2.3",
     "react-native": "0.86.3",
+    "react-native-webrtc": "^124.0.8",
     "telemetry-ios-native": "file:./modules/telemetry-ios-native"
   },
   "devDependencies": {

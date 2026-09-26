@@ -1,0 +1,25 @@
+{
+  "version": "telemetry-gateway/1",
+  "principles": {
+    "payloadVisibility": "opaque",
+    "gatewayTrust": "transport-only",
+    "endToEndEncryption": true,
+    "finalReceiptAuthority": "recipient-device"
+  },
+  "gatewayKinds": {
+    "lora": {
+      "maxPayloadBytes": 2000,
+      "preferredContent": ["text", "sos", "coordinates", "receipt", "route-advertisement"],
+      "metered": false
+    },
+    "satellite-gateway": {
+      "maxPayloadBytes": 64000,
+      "preferredContent": ["text", "sos", "coordinates", "receipt", "route-advertisement", "small-file"],
+      "metered": true
+    }
+  },
+  "adapter": {
+    "required": ["id", "kind", "isAvailable", "send"],
+    "optional": ["quality", "metered", "maxPayloadBytes", "diagnostics"]
+  }
+}
