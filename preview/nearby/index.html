@@ -1,0 +1,111 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover" />
+  <meta name="theme-color" content="#06111c" />
+  <title>Telemetry · Nearby Field Preview</title>
+  <link rel="stylesheet" href="./styles.css" />
+</head>
+<body>
+  <main class="stage">
+    <section class="phone-shell" aria-label="Telemetry mobile preview">
+      <header class="topbar">
+        <div>
+          <div class="brand-row"><span class="brand-mark"></span><strong>Telemetry</strong><span class="preview-pill">M1.3B</span></div>
+          <p class="top-sub">Nearby intelligence · signal space</p>
+        </div>
+        <button class="icon-btn" id="freezeBtn" aria-label="Pause simulation">Ⅱ</button>
+      </header>
+
+      <section class="nearby-shell">
+        <div class="nearby-head">
+          <div>
+            <p class="eyebrow">NEARBY</p>
+            <h1>Devices around you</h1>
+          </div>
+          <div class="live-pill"><span></span><b id="peerCount">5</b> live</div>
+        </div>
+
+        <div class="view-switch" role="tablist">
+          <button class="view-tab active" data-view="list">List</button>
+          <button class="view-tab" data-view="field">Field</button>
+        </div>
+
+        <div class="filters" id="filters">
+          <button class="chip active" data-filter="all">All</button>
+          <button class="chip" data-filter="trusted">Trusted</button>
+          <button class="chip" data-filter="gateway">Gateway</button>
+          <button class="chip" data-filter="internet">Internet</button>
+        </div>
+
+        <section id="listView" class="view active list-view">
+          <div class="summary-card">
+            <div><span class="summary-label">Best route</span><strong id="bestRoute">Direct BLE</strong></div>
+            <div><span class="summary-label">Strongest peer</span><strong id="strongestPeer">Adwin iPhone</strong></div>
+          </div>
+          <div id="peerList" class="peer-list"></div>
+        </section>
+
+        <section id="fieldView" class="view field-view" aria-label="Interactive nearby field">
+          <div class="field-viewport" id="fieldViewport">
+            <div class="field-glow"></div>
+            <div class="field-world" id="fieldWorld">
+              <div class="field-grid"></div>
+              <div class="field-cross-x"></div>
+              <div class="field-cross-y"></div>
+              <button class="you-node" id="youNode" aria-label="You"><span></span><small>YOU</small></button>
+              <div id="fieldNodes"></div>
+            </div>
+
+            <div class="field-hud top-left">
+              <span class="summary-label">Signal space</span>
+              <strong>Nearby Field</strong>
+              <small>RSSI based · not GPS</small>
+            </div>
+            <div class="field-hud top-right"><b id="zoomLabel">100%</b></div>
+
+            <div class="field-controls">
+              <button id="zoomOutBtn" aria-label="Zoom out">−</button>
+              <button id="centerBtn" aria-label="Center on me">⌖</button>
+              <button id="zoomInBtn" aria-label="Zoom in">+</button>
+            </div>
+            <div class="field-help">Drag to move · pinch to zoom · tap a peer</div>
+          </div>
+        </section>
+      </section>
+
+      <nav class="bottom-nav">
+        <button><span>◌</span><small>Chats</small></button>
+        <button class="active"><span>⌁</span><small>Nearby</small></button>
+        <button><span>◇</span><small>Network</small></button>
+        <button><span>!</span><small>SOS</small></button>
+        <button><span>⚙</span><small>Settings</small></button>
+      </nav>
+
+      <div class="sheet-backdrop" id="sheetBackdrop" hidden></div>
+      <aside class="peer-sheet" id="peerSheet" aria-hidden="true">
+        <div class="sheet-handle"></div>
+        <div id="sheetContent"></div>
+        <div class="sheet-actions">
+          <button class="primary-btn" id="openChatBtn">Open conversation</button>
+          <button class="secondary-btn" id="pinPeerBtn">Pin peer</button>
+        </div>
+        <button class="ghost-btn" id="closeSheetBtn">Close</button>
+      </aside>
+    </section>
+
+    <aside class="review-panel">
+      <p class="eyebrow">PRODUCT REVIEW</p>
+      <h2>M1.3B Nearby Field</h2>
+      <p>Open signal-space canvas for nearby peer discovery. No circular mask, no GPS claim, and no native transport changes.</p>
+      <div class="review-item"><b>01</b><span>Free pan in every direction</span></div>
+      <div class="review-item"><b>02</b><span>Pinch / + / − zoom</span></div>
+      <div class="review-item"><b>03</b><span>Tap peer → profile sheet</span></div>
+      <div class="review-item"><b>04</b><span>Center-on-me control</span></div>
+      <div class="review-note">Peer coordinates are a relative signal visualization derived from RSSI behavior, not physical GPS location.</div>
+    </aside>
+  </main>
+  <script src="./app.js"></script>
+</body>
+</html>
