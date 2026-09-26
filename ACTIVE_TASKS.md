@@ -3,11 +3,22 @@
 Status values: `TODO`, `IN_PROGRESS`, `READY_FOR_DEVICE_ACCEPTANCE`, `BLOCKED_EXTERNAL`, `DONE`.
 
 ## P0.1 iOS two-device media acceptance
-Status: `IN_PROGRESS`
+Status: `READY_FOR_DEVICE_ACCEPTANCE`
 
 Primary devices:
 - iPhone 15 Pro
 - iPhone 11 Pro
+
+Cloud/simulator gate completed 2026-09-26:
+- protocol/unit suite passed locally on SPARK
+- iOS TypeScript passed
+- Expo Doctor passed with intentional metadata exclusions for the local native module and WebRTC package
+- local Xcode simulator compile passed
+- GitHub iOS validation and native simulator compile passed after PR #28 repaired the generated app scheme gate
+
+Current hardware gate:
+- both known physical iPhones are currently visible to Xcode as offline
+- no physical media acceptance row is marked PASS yet
 
 Acceptance:
 - photo can be selected and appears immediately as a local preview
@@ -40,6 +51,11 @@ Related foundation: PR #23.
 ## P0.3 Voice call
 Status: `IN_PROGRESS`
 
+Current implementation state:
+- iOS voice/video signaling and WebRTC media path exist in the M1.6 lineage
+- local P0 candidate now wires native AVAudioSession speaker/earpiece routing in addition to mute/media controls
+- latest local P0 integration commits are preserved on SPARK; physical call acceptance is still required
+
 Acceptance:
 - call controls/status integrated into primary Chat UI
 - microphone permission requested only when needed
@@ -64,6 +80,9 @@ Acceptance:
 ## P0.5 Android self-update acceptance
 Status: `READY_FOR_DEVICE_ACCEPTANCE`
 
+Current hardware gate:
+- no Android test devices are currently connected to SPARK
+
 Acceptance:
 - promote first approved Preview release
 - Railway returns the promoted manifest
@@ -74,7 +93,14 @@ Acceptance:
 Related foundation: PR #26.
 
 ## P0.6 UX regression sweep
-Status: `TODO`
+Status: `IN_PROGRESS`
+
+Current audit state:
+- Nearby List and Field modes remain present
+- peer/contact profile photos remain wired
+- chat timeline scroll-to-latest behavior is wired
+- reliability lab exposes BLE, Wi-Fi and Auto transport choices distinctly
+- a stale Calls-screen description was found and corrected in the local P0 candidate; regression coverage was added
 
 Acceptance:
 - Nearby List and Field views both remain available
